@@ -1,0 +1,25 @@
+name: Integration
+
+# Layer 3 (contracts/testing-strategy.md, ADR 0024): the real chart on a real (kind) cluster against
+# a real PostgreSQL, the BoothModule validated by booth-core's real CRD schema. On merge to main and
+# nightly, not every push. What stands in for booth-core, and why: hack/kind-integration.sh's header.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "10 8 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  kind:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: helm/kind-action@v1
+        with:
+          install_only: true
+      - uses: azure/setup-helm@v4
+      - run: bash hack/kind-integration.sh

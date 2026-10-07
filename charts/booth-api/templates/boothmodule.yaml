@@ -1,0 +1,33 @@
+# Registers booth-api with booth-core's module registry (ADR 0019, contracts/module-manifest.md).
+#
+# One native view under Manage (ADR 0017, contracts/ui-integration.md): pick a catalog dataset,
+# generate its API, issue and revoke keys. UI package: @projectbooth/api-ui (web/).
+#
+# navPath is /apis, not /api: the shell and booth-core share an origin, and /api/* is core's own
+# API (contracts/core-platform-api.md), so a shell route of /api would collide with it.
+#
+# `database: {enabled: true}` asks booth-core for this module's OWN database (ADR 0053), where API
+# key hashes and generated-API definitions live. It is unrelated to the workspace databases
+# booth-database provisions (ADR 0081), which generated APIs read but this module never owns.
+apiVersion: booth.projectbooth.io/v1alpha1
+kind: BoothModule
+metadata:
+  name: api
+  labels:
+    {{- include "booth-api.labels" . | nindent 4 }}
+spec:
+  id: api
+  displayName: API
+  icon: api
+  version: {{ .Chart.AppVersion | quote }}
+  contractVersion: "0.1.0"
+  hasOwnUi: true
+  uiIntegrationMode: native
+  navGroup: manage
+  navPath: /apis
+  healthCheckPath: /healthz
+  database:
+    enabled: true
+  serviceRef:
+    name: {{ include "booth-api.fullname" . }}
+    port: {{ .Values.service.port }}

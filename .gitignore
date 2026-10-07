@@ -1,0 +1,6 @@
+/booth-api
+*.exe
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo
+web/node_modules/.tsbuild-node/
