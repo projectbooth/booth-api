@@ -1,0 +1,9 @@
+apiVersion: v2
+name: booth-api
+description: >
+  Project Booth's API module: generated, read-only REST and GraphQL APIs over catalog datasets,
+  authenticated by API keys this module issues (ADR 0100).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/projectbooth/booth-api

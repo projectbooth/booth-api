@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "booth-api.fullname" . }}
+  labels:
+    {{- include "booth-api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "booth-api.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        {{- include "booth-api.labels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+    spec:
+      serviceAccountName: {{ include "booth-api.serviceAccountName" . }}
+      # The module never calls the Kubernetes API.
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: booth-api
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: BOOTH_HTTP_ADDR
+              value: ":8080"
+            # ADR 0053: booth-core writes this Secret into the module's namespace because the
+            # manifest declares `database`. The pod may sit in CreateContainerConfigError for a
+            # moment after install until core has written it.
+            - name: BOOTH_API_DATABASE_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: booth-database-credentials
+                  key: dsn
+          # /livez never touches PostgreSQL (a restart can't fix an outage); /healthz does, and
+          # is what core polls.
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

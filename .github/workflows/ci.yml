@@ -1,0 +1,68 @@
+name: CI
+
+# Layers 1-2 (contracts/testing-strategy.md, ADR 0024): unit + contract tests on every push and PR.
+# Branch protection on main requires every job here to pass before merge. No coverage threshold.
+# Runners pinned to a named release, not ubuntu-latest (ADR 0099).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: azure/setup-helm@v4 # test/contract renders the chart
+      - name: Verify gofmt
+        run: |
+          fmt_out="$(gofmt -l .)"
+          if [ -n "$fmt_out" ]; then echo "Not gofmt-formatted:"; echo "$fmt_out"; exit 1; fi
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+      - run: go vet ./...
+      - name: Unit + contract tests
+        env:
+          BOOTH_TEST_REQUIRE_HELM: "1"
+        run: go test -race -count=1 ./...
+
+  web:
+    # @projectbooth/api-ui (ADR 0030): the module's native UI package.
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test -- --run
+      - run: npm run build
+
+  helm-lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - run: helm lint charts/booth-api
+
+  image:
+    # Catches a broken Dockerfile on the PR that breaks it. Not pushed.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t booth-api:ci .
