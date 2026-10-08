@@ -19,7 +19,12 @@ Built (details and the choices made: `docs/decisions/0001-keys-and-api-definitio
 - The management API at `/api/*`, behind OIDC verification (ADR 0041): generate an API from a
   catalog dataset (a snapshot of its table), regenerate, delete; issue API keys (shown once,
   stored as a hash, scoped to datasets), list, revoke.
-- `@projectbooth/api-ui`, the native view for all of the above (ADR 0030/0031/0033).
+- The GraphQL engine (`internal/gql`; library choice `docs/decisions/0002`, schema and paging
+  `docs/decisions/0003`): schema generated from a definition's snapshot, query validation, every
+  ADR 0100 limit checked before SQL, one read-only parameterized statement per root field, keyset
+  pagination, introspection. Tested against real Postgres; not mounted on a route yet.
+- `@projectbooth/api-ui`, the native view for all of the above (ADR 0030/0031/0033), including each
+  API's GraphQL schema.
 - `charts/booth-api` with the `BoothModule` registration (ADR 0019): `id: api`, native UI under
   Manage at `/apis`, `database: {enabled: true}`.
 - CI per `contracts/testing-strategy.md` (below).
@@ -32,7 +37,7 @@ Not built yet, and why:
   end against a fixture table.
 - **The generated endpoints.** They are served on core's public routes (ADR 0101), which core hasn't
   built; key verification exists but isn't mounted.
-- **GraphQL and REST generation**: the next two steps.
+- **REST generation**: the next step.
 - booth-catalog hasn't built `format: "postgres"` (ADR 0102) yet; booth-api reads the table block
   from a provisional field name (`internal/catalog`).
 
@@ -58,6 +63,7 @@ Not built yet, and why:
 | `internal/api` | Management API handlers |
 | `internal/apis` | Dataset-to-API definition flow |
 | `internal/apidef` | The definition snapshot, reconciliation, slugs |
+| `internal/gql` | GraphQL schema generation, limits, execution, introspection |
 | `internal/catalog` | booth-catalog client, through core's gateway as the caller |
 | `internal/source` | Table introspection; per-workspace pools (not wired yet) |
 | `internal/keys` | Key format, hashing, issue/revoke/verify |

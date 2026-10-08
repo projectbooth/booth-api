@@ -142,6 +142,12 @@ func TestGenerateAndManageAPIs(t *testing.T) {
 	rec, _ = e.do(editor, "acme", "POST", "/api/apis", map[string]string{"datasetId": "ds-orders"})
 	e.want(rec, 409, "second API for the same dataset")
 
+	rec, got = e.do(viewer, "acme", "GET", "/api/apis/"+id+"/schema", nil)
+	e.want(rec, 200, "schema")
+	if sdl, _ := got["sdl"].(string); !strings.Contains(sdl, "amount: Decimal") || !strings.Contains(sdl, "row(id: BigInt!): Row") {
+		t.Errorf("sdl = %s", sdl)
+	}
+
 	rec, got = e.do(viewer, "acme", "GET", "/api/apis", nil)
 	e.want(rec, 200, "viewer listing")
 	if n := len(got["items"].([]any)); n != 1 {
@@ -188,6 +194,10 @@ func TestGenerateRefusals(t *testing.T) {
 	e.catalog["ds-file"] = `{"id":"ds-file","name":"Raw","location":{"backendId":"b","path":"p"},"schema":[]}`
 	e.dataset("ds-missing-table", "Ghost", "no_such_table", `[]`)
 	e.dataset("ds-drift", "Drift", "orders", `[{"name":"id"},{"name":"amount"},{"name":"currency"}]`)
+	if _, err := e.pool.Exec(context.Background(), `CREATE TABLE blobs (b bytea)`); err != nil {
+		t.Fatal(err)
+	}
+	e.dataset("ds-blobs", "Blobs", "blobs", `[]`)
 
 	for _, tc := range []struct {
 		dataset string
@@ -196,6 +206,7 @@ func TestGenerateRefusals(t *testing.T) {
 		{"ds-file", 422},          // v0 is postgres only
 		{"ds-missing-table", 422}, // the catalog names a table that isn't there
 		{"ds-nope", 404},          // not in the catalog (or not visible to the caller)
+		{"ds-blobs", 422},         // no column of a type the API can serve
 	} {
 		rec, _ := e.do(editor, "acme", "POST", "/api/apis", map[string]string{"datasetId": tc.dataset})
 		e.want(rec, tc.status, tc.dataset)

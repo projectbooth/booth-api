@@ -1,4 +1,4 @@
-import type { ApiDefinition, ApiKey, CatalogDataset, IssuedKey, Mismatch } from "../types";
+import type { ApiDefinition, ApiKey, CatalogDataset, GraphQLSchema, IssuedKey, Mismatch } from "../types";
 
 // Mounted inside booth-design's shell, so requests resolve against the shell's origin and go
 // through booth-core's gateway at /modules/{id}/*, which strips the prefix before forwarding. This
@@ -60,6 +60,8 @@ export const listApis = (ctx: ApiContext) => request<{ items: ApiDefinition[] }>
 
 export const generateApi = (ctx: ApiContext, datasetId: string) =>
   request<ApiDefinition>(ctx, `${BASE}/apis`, { method: "POST", body: { datasetId } });
+
+export const getSchema = (ctx: ApiContext, id: string) => request<GraphQLSchema>(ctx, `${BASE}/apis/${encodeURIComponent(id)}/schema`);
 
 export const regenerateApi = (ctx: ApiContext, id: string) =>
   request<ApiDefinition>(ctx, `${BASE}/apis/${encodeURIComponent(id)}/regenerate`, { method: "POST" });

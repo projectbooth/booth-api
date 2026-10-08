@@ -3,6 +3,7 @@ import {
   ApiError,
   deleteApi,
   generateApi,
+  getSchema,
   issueKey,
   listApis,
   listKeys,
@@ -220,8 +221,38 @@ function ApiCard({ api, def, canWrite, onChange }: { api: ApiContext; def: ApiDe
       <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
         Columns as of {formatDate(def.generatedAt)}. The API keeps these until you regenerate it.
       </p>
+      <SchemaToggle api={api} id={def.id} generatedAt={def.generatedAt} />
       {error && <ErrorBanner message={error.message} mismatches={error.mismatches} />}
     </Panel>
+  );
+}
+
+function SchemaToggle({ api, id, generatedAt }: { api: ApiContext; id: string; generatedAt: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mt-2">
+      <button type="button" className="text-xs font-medium text-indigo-700 hover:underline dark:text-indigo-400" aria-expanded={open} onClick={() => setOpen(!open)}>
+        {open ? "Hide GraphQL schema" : "Show GraphQL schema"}
+      </button>
+      {/* generatedAt in the key reloads the schema after a regenerate */}
+      {open && <SchemaView key={generatedAt} api={api} id={id} />}
+    </div>
+  );
+}
+
+function SchemaView({ api, id }: { api: ApiContext; id: string }) {
+  const { state } = useLoad(() => getSchema(api, id), [api, id]);
+  if (state.status === "loading") return <Muted>Loading schema…</Muted>;
+  if (state.status === "error") return <ErrorBanner message={state.error} />;
+  return (
+    <div className="mt-2 flex flex-col gap-2">
+      {state.data.omitted.length > 0 && (
+        <p className="text-xs text-amber-800 dark:text-amber-300">
+          Not exposed (no faithful GraphQL type): {state.data.omitted.map((o) => `${o.column} (${o.type})`).join(", ")}
+        </p>
+      )}
+      <pre className="max-h-96 overflow-auto rounded bg-slate-50 p-3 font-mono text-xs text-slate-800 dark:bg-slate-950 dark:text-slate-200">{state.data.sdl}</pre>
+    </div>
   );
 }
 
