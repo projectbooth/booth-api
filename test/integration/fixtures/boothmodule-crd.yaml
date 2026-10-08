@@ -175,6 +175,29 @@ spec:
                 required:
                 - kinds
                 type: object
+              publicRoutes:
+                description: |-
+                  PublicRoutes declares module-relative path prefixes core's gateway proxies without a
+                  platform login, at /modules/{id}/public/<prefix> (ADR 0101). Core performs no
+                  authentication on these routes, strips any inbound X-Booth-Workspace/X-Booth-Role/
+                  X-Booth-Identity and sets none of them, and never writes to the user directory for them —
+                  the module authenticates callers itself and returns its own 401/403. Omit it and the
+                  module gets no public route at all; the ordinary /modules/{id}/* route is unaffected
+                  either way.
+                properties:
+                  pathPrefixes:
+                    description: |-
+                      PathPrefixes lists module-relative path prefixes proxied without a platform login. Each
+                      must start and end with "/" (e.g. "/v1/") — contracts/module-manifest.md's exact grammar.
+                    items:
+                      pattern: ^/.*/$
+                      type: string
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: set
+                required:
+                - pathPrefixes
+                type: object
               requiredScopes:
                 description: RequiredScopes lists auth scopes the module needs core
                   to grant it access to.

@@ -1,7 +1,6 @@
 // Command api is booth-api's entrypoint: generated read-only REST and GraphQL APIs over catalog
-// datasets, authenticated by module-issued API keys (ADR 0100). Today it serves the management API
-// (generating API definitions, issuing and revoking keys); the generated endpoints wait on core's
-// public routes (ADR 0101) and the sidecar data path (ADR 0103).
+// datasets, authenticated by module-issued API keys (ADR 0100): the management API at /api/ and the
+// key-authenticated generated endpoints at /v1/ (core's public route, ADR 0101).
 package main
 
 import (
@@ -23,7 +22,9 @@ import (
 	"github.com/projectbooth/booth-api/internal/auth"
 	"github.com/projectbooth/booth-api/internal/catalog"
 	"github.com/projectbooth/booth-api/internal/config"
+	"github.com/projectbooth/booth-api/internal/gql"
 	"github.com/projectbooth/booth-api/internal/keys"
+	"github.com/projectbooth/booth-api/internal/public"
 	"github.com/projectbooth/booth-api/internal/server"
 	"github.com/projectbooth/booth-api/internal/source"
 	"github.com/projectbooth/booth-api/internal/store"
@@ -78,6 +79,9 @@ func run() error {
 	}
 
 	st := store.New(pool)
+	// No workspace data path yet (ADR 0103, the next change): generating an API and every data
+	// request on the public route answer 503 saying so. Keys, scope and the schema documents work.
+	var pools source.Pools = source.Unavailable{}
 	httpServer := &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: server.NewRouter(server.Deps{
@@ -90,11 +94,10 @@ func run() error {
 					}
 					return nil
 				},
-				// No data source until the sidecar path is built (ADR 0103 item 4): generating an
-				// API answers 503 with a message saying so.
-				APIs: apis.Service{Catalog: &catalog.Client{CoreURL: cfg.CoreURL}, Store: st, Pools: source.Unavailable{}},
+				APIs: apis.Service{Catalog: &catalog.Client{CoreURL: cfg.CoreURL}, Store: st, Pools: pools},
 				Keys: keys.Service{Store: st},
 			}),
+			Public: public.NewHandler(public.Deps{Keys: keys.Service{Store: st}, APIs: st, Pools: pools, Limits: gql.DefaultLimits}),
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,

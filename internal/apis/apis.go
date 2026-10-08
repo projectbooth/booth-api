@@ -50,7 +50,7 @@ func (s Service) Generate(ctx context.Context, who auth.Identity, datasetID stri
 	if err != nil {
 		return apidef.Definition{}, err
 	}
-	d, err := s.snapshot(ctx, who.Workspace, ds)
+	d, err := s.snapshot(ctx, who, ds)
 	if err != nil {
 		return apidef.Definition{}, err
 	}
@@ -69,7 +69,7 @@ func (s Service) Regenerate(ctx context.Context, who auth.Identity, id string) (
 	if err != nil {
 		return apidef.Definition{}, err
 	}
-	d, err := s.snapshot(ctx, who.Workspace, ds)
+	d, err := s.snapshot(ctx, who, ds)
 	if err != nil {
 		return apidef.Definition{}, err
 	}
@@ -77,11 +77,13 @@ func (s Service) Regenerate(ctx context.Context, who auth.Identity, id string) (
 	return s.Store.UpdateSnapshot(ctx, d)
 }
 
-func (s Service) snapshot(ctx context.Context, workspace string, ds catalog.Dataset) (apidef.Definition, error) {
+func (s Service) snapshot(ctx context.Context, who auth.Identity, ds catalog.Dataset) (apidef.Definition, error) {
+	workspace := who.Workspace
 	if ds.Format != catalog.FormatPostgres || ds.Table == nil {
 		return apidef.Definition{}, ErrUnsupportedFormat
 	}
-	pool, err := s.Pools.Pool(ctx, workspace)
+	// Introspected as the person generating the API: the same read access a key they issue gets.
+	pool, err := s.Pools.Pool(ctx, workspace, who.Subject)
 	if err != nil {
 		return apidef.Definition{}, err
 	}

@@ -27,23 +27,16 @@ Built (details and the choices made: `docs/decisions/0001-keys-and-api-definitio
   field selection and cursors, `GET /rows/{key}`, and a generated OpenAPI 3.1 document linted in CI.
   It shares the query layer (`internal/table`) with GraphQL, so both protocols compile the same
   filter to the same SQL and their cursors are interchangeable.
-- Both endpoints are tested against real Postgres and are **not mounted on any route yet** (below).
-- `@projectbooth/api-ui`, the native view for all of the above (ADR 0030/0031/0033), including each
-  API's GraphQL schema.
-- `charts/booth-api` with the `BoothModule` registration (ADR 0019): `id: api`, native UI under
-  Manage at `/apis`, `database: {enabled: true}`.
-- CI per `contracts/testing-strategy.md` (below).
+- The public, key-authenticated path (`internal/public`, `docs/decisions/0005`): core's gateway
+  serves `/modules/api/public/v1/<slug>/...` with no platform login (ADR 0101, manifest
+  `publicRoutes: [/v1/]`), and booth-api checks the API key, the API's workspace and the key's
+  dataset scope, returning its own 401/403/404. `X-Booth-*` headers are never read there.
 
 Not built yet, and why:
 
-- **Reading workspace data.** Generating an API needs to introspect the table through a
-  per-workspace credential sidecar (ADR 0103), which waits on core confirming the workload-token
-  minting bound (ADR 0103 item 4). Until then generation answers 503. The flow is tested end to
-  end against a fixture table.
-- **The generated endpoints.** They are served on core's public routes (ADR 0101), which core hasn't
-  built; key verification exists but isn't mounted.
-- booth-catalog hasn't built `format: "postgres"` (ADR 0102) yet; booth-api reads the table block
-  from a provisional field name (`internal/catalog`).
+- **Reading workspace data.** Every data request needs a per-workspace credential sidecar under a
+  workload token owned by the key's creator (ADR 0103): the next change. Until then data requests
+  and API generation answer 503; keys, scope and the schema documents work.
 
 ## Judgment calls in the scaffold (see also `docs/decisions/`)
 
@@ -70,6 +63,7 @@ Not built yet, and why:
 | `internal/table` | Query layer shared by both protocols: model, filters, paging, limits |
 | `internal/gql` | GraphQL schema generation, limits, execution, introspection |
 | `internal/rest` | REST handler and OpenAPI document |
+| `internal/public` | Key-authenticated public path serving both protocols |
 | `internal/catalog` | booth-catalog client, through core's gateway as the caller |
 | `internal/source` | Table introspection; per-workspace pools (not wired yet) |
 | `internal/keys` | Key format, hashing, issue/revoke/verify |

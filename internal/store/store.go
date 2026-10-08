@@ -124,6 +124,11 @@ func (s *Store) GetAPI(ctx context.Context, workspace, id string) (apidef.Defini
 	return scanAPI(s.pool.QueryRow(ctx, `SELECT `+apiColumns+` FROM apis WHERE workspace = $1 AND id = $2`, workspace, id))
 }
 
+// GetAPIBySlug returns the API a public URL names (/v1/<slug>/...).
+func (s *Store) GetAPIBySlug(ctx context.Context, workspace, slug string) (apidef.Definition, error) {
+	return scanAPI(s.pool.QueryRow(ctx, `SELECT `+apiColumns+` FROM apis WHERE workspace = $1 AND slug = $2`, workspace, slug))
+}
+
 // ListAPIs returns the workspace's APIs, by dataset name.
 func (s *Store) ListAPIs(ctx context.Context, workspace string) ([]apidef.Definition, error) {
 	rows, err := s.pool.Query(ctx, `SELECT `+apiColumns+` FROM apis WHERE workspace = $1 ORDER BY lower(dataset_name), slug`, workspace)
@@ -173,6 +178,7 @@ type Key struct {
 	CreatedAt     time.Time  `json:"createdAt"`
 	RevokedAt     *time.Time `json:"revokedAt"`
 	RevokedBy     string     `json:"revokedBy,omitempty"`
+	LastUsedAt    *time.Time `json:"lastUsedAt"`
 	DatasetIDs    []string   `json:"datasetIds"`
 }
 
@@ -206,13 +212,13 @@ func (s *Store) CreateKey(ctx context.Context, k Key) (Key, error) {
 	return k, err
 }
 
-const keyQuery = `SELECT k.id, k.workspace, k.name, k.secret_hash, k.created_by, k.created_by_name, k.created_at, k.revoked_at, coalesce(k.revoked_by, ''),
+const keyQuery = `SELECT k.id, k.workspace, k.name, k.secret_hash, k.created_by, k.created_by_name, k.created_at, k.revoked_at, coalesce(k.revoked_by, ''), k.last_used_at,
 	coalesce(array_agg(kd.dataset_id ORDER BY kd.dataset_id COLLATE "C") FILTER (WHERE kd.dataset_id IS NOT NULL), '{}')
 	FROM api_keys k LEFT JOIN api_key_datasets kd ON kd.key_id = k.id`
 
 func scanKey(row pgx.Row) (Key, error) {
 	var k Key
-	err := row.Scan(&k.ID, &k.Workspace, &k.Name, &k.SecretHash, &k.CreatedBy, &k.CreatedByName, &k.CreatedAt, &k.RevokedAt, &k.RevokedBy, &k.DatasetIDs)
+	err := row.Scan(&k.ID, &k.Workspace, &k.Name, &k.SecretHash, &k.CreatedBy, &k.CreatedByName, &k.CreatedAt, &k.RevokedAt, &k.RevokedBy, &k.LastUsedAt, &k.DatasetIDs)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return k, ErrNotFound
 	}
@@ -257,6 +263,14 @@ func (s *Store) RevokeKey(ctx context.Context, workspace, id, by string) (Key, e
 		return k, fmt.Errorf("revoking key %s: no row updated", id)
 	}
 	return k, err
+}
+
+// TouchKey records that a key was used, at most once per minute per key, so a busy key doesn't
+// turn every read into a write.
+func (s *Store) TouchKey(ctx context.Context, id string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE api_keys SET last_used_at = now()
+		WHERE id = $1 AND (last_used_at IS NULL OR last_used_at < now() - interval '1 minute')`, id)
+	return err
 }
 
 // constraint returns the violated unique constraint's name, or "" for no error / another error.

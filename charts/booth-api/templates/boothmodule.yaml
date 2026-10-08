@@ -28,6 +28,12 @@ spec:
   healthCheckPath: /healthz
   database:
     enabled: true
+  # ADR 0101: core's gateway proxies /modules/api/public/v1/... here as /v1/... with no platform
+  # login; booth-api authenticates every such request by API key (internal/public) and returns its
+  # own 401/403. Core strips X-Booth-* on this route and booth-api never reads them there.
+  publicRoutes:
+    pathPrefixes:
+      - /v1/
   serviceRef:
     name: {{ include "booth-api.fullname" . }}
     port: {{ .Values.service.port }}

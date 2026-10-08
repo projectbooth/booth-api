@@ -74,7 +74,9 @@ helm upgrade --install a charts/booth-api -n "$NS" \
   --set image.repository=booth-api --set image.tag=it --set image.pullPolicy=Never --wait --timeout 5m
 
 echo "--- BoothModule accepted by booth-core's real CRD schema:"
-kubectl -n "$NS" get boothmodule api -o jsonpath='{.spec.id} navPath={.spec.navPath} database={.spec.database.enabled}{"\n"}'
+kubectl -n "$NS" get boothmodule api -o jsonpath='{.spec.id} navPath={.spec.navPath} database={.spec.database.enabled} publicRoutes={.spec.publicRoutes.pathPrefixes}{"\n"}'
+# A CRD without the field would prune it silently, so check it survived.
+[ "$(kubectl -n "$NS" get boothmodule api -o jsonpath='{.spec.publicRoutes.pathPrefixes[0]}')" = /v1/ ] || { echo "publicRoutes pruned by the CRD"; exit 1; }
 
 echo "--- readiness against the real database (helm --wait already required it):"
 kubectl -n "$NS" get deploy a-booth-api -o jsonpath='{.status.readyReplicas}/{.spec.replicas} ready{"\n"}'
@@ -90,9 +92,15 @@ kubectl -n "$NS" port-forward deploy/a-booth-api 18080:8080 >/dev/null 2>&1 &
 pf=$!
 for _ in $(seq 30); do curl -fs localhost:18080/livez >/dev/null 2>&1 && break; sleep 1; done
 code=$(curl -s -o /dev/null -w '%{http_code}' localhost:18080/api/keys)
-kill "$pf" 2>/dev/null || true
-[ "$code" = 503 ] || { echo "GET /api/keys answered $code, want 503"; exit 1; }
+[ "$code" = 503 ] || { kill "$pf"; echo "GET /api/keys answered $code, want 503"; exit 1; }
 echo "GET /api/keys: 503"
+echo "--- the public path (ADR 0101) authenticates by key itself: no key is a 401, a forged X-Booth-* changes nothing"
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Booth-Workspace: acme' -H 'X-Booth-Role: owner' localhost:18080/v1/orders/rows)
+[ "$code" = 401 ] || { kill "$pf"; echo "GET /v1/orders/rows answered $code, want 401"; exit 1; }
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer booth_ak_aaaaaaaaaaaaa_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' localhost:18080/v1/orders/rows)
+[ "$code" = 401 ] || { kill "$pf"; echo "unknown key answered $code, want 401"; exit 1; }
+echo "GET /v1/orders/rows: 401 without a key, 401 with an unknown one"
+kill "$pf" 2>/dev/null || true
 
 echo "--- /healthz goes unready when the database goes away, and recovers:"
 pod=$(kubectl -n "$NS" get pod -l app.kubernetes.io/component=api -o jsonpath='{.items[0].metadata.name}')

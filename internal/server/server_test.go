@@ -41,16 +41,19 @@ func TestLivezIgnoresDatabase(t *testing.T) {
 	}
 }
 
-// Only /api/* reaches the management API. Generated endpoints aren't mounted until core's public
-// routes exist (ADR 0101), so their paths must 404 rather than fall through to anything.
+// /api/* reaches the management API and /v1/* the public handler; nothing else is served.
 func TestRoutes(t *testing.T) {
 	var hit string
-	api := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { hit = r.URL.Path })
-	h := NewRouter(Deps{DB: fakeDB{}, API: api})
-	if get(t, h, "/api/keys"); hit != "/api/keys" {
-		t.Errorf("/api/keys not routed to the management API (hit %q)", hit)
+	api := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { hit = "api " + r.URL.Path })
+	pub := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { hit = "public " + r.URL.Path })
+	h := NewRouter(Deps{DB: fakeDB{}, API: api, Public: pub})
+	if get(t, h, "/api/keys"); hit != "api /api/keys" {
+		t.Errorf("/api/keys routed to %q", hit)
 	}
-	for _, p := range []string{"/", "/v1/orders/rows", "/public/v1/x", "/graphql"} {
+	if get(t, h, "/v1/orders/rows"); hit != "public /v1/orders/rows" {
+		t.Errorf("/v1/orders/rows routed to %q", hit)
+	}
+	for _, p := range []string{"/", "/public/v1/x", "/graphql", "/v2/orders/rows"} {
 		hit = ""
 		if rec := get(t, h, p); rec.Code != http.StatusNotFound || hit != "" {
 			t.Errorf("%s = %d (hit %q), want 404", p, rec.Code, hit)
