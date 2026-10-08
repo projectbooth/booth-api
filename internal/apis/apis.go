@@ -12,7 +12,9 @@ import (
 	"github.com/projectbooth/booth-api/internal/auth"
 	"github.com/projectbooth/booth-api/internal/catalog"
 	"github.com/projectbooth/booth-api/internal/gql"
+	"github.com/projectbooth/booth-api/internal/rest"
 	"github.com/projectbooth/booth-api/internal/source"
+	"github.com/projectbooth/booth-api/internal/table"
 )
 
 // ErrUnsupportedFormat: v0 generates APIs for postgres datasets only (ARCHITECTURE.md item 53).
@@ -100,7 +102,7 @@ func (s Service) snapshot(ctx context.Context, workspace string, ds catalog.Data
 	}
 	// Refuse now rather than store an API that can never serve anything (every column of a type
 	// the API omits, e.g. all bytea).
-	if _, err := gql.New(gql.NewModel(d), gql.DefaultLimits); err != nil {
+	if _, err := gql.New(table.NewModel(d), gql.DefaultLimits); err != nil {
 		return apidef.Definition{}, err
 	}
 	return d, nil
@@ -109,8 +111,8 @@ func (s Service) snapshot(ctx context.Context, workspace string, ds catalog.Data
 // Schema is a generated API's GraphQL schema as the endpoint will serve it, plus the columns left
 // out because their types have no faithful mapping (docs/design-v0.md §3).
 type Schema struct {
-	SDL     string        `json:"sdl"`
-	Omitted []gql.Omitted `json:"omitted"`
+	SDL     string          `json:"sdl"`
+	Omitted []table.Omitted `json:"omitted"`
 }
 
 // GraphQLSchema renders the stored snapshot's schema.
@@ -119,14 +121,14 @@ func (s Service) GraphQLSchema(ctx context.Context, workspace, id string) (Schem
 	if err != nil {
 		return Schema{}, err
 	}
-	m := gql.NewModel(d)
+	m := table.NewModel(d)
 	e, err := gql.New(m, gql.DefaultLimits)
 	if err != nil {
 		return Schema{}, err
 	}
 	omitted := m.Omitted
 	if omitted == nil {
-		omitted = []gql.Omitted{}
+		omitted = []table.Omitted{}
 	}
 	return Schema{SDL: e.SDL, Omitted: omitted}, nil
 }
@@ -147,4 +149,17 @@ func (s Service) Delete(ctx context.Context, workspace, id string) error {
 		return fmt.Errorf("deleting API %s: %w", id, err)
 	}
 	return nil
+}
+
+// OpenAPI renders the stored snapshot's REST OpenAPI document.
+func (s Service) OpenAPI(ctx context.Context, workspace, id string) (map[string]any, error) {
+	d, err := s.Store.GetAPI(ctx, workspace, id)
+	if err != nil {
+		return nil, err
+	}
+	m := table.NewModel(d)
+	if len(m.Fields) == 0 {
+		return nil, gql.ErrNoFields
+	}
+	return rest.OpenAPI(m, table.DefaultLimits), nil
 }

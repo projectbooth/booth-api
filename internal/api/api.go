@@ -55,6 +55,7 @@ func NewHandler(d Deps) http.Handler {
 	r.Get("/api/apis", h.listAPIs)
 	r.Get("/api/apis/{id}", h.getAPI)
 	r.Get("/api/apis/{id}/schema", h.schema)
+	r.Get("/api/apis/{id}/openapi", h.openapi)
 	r.With(writer).Post("/api/apis", h.generate)
 	r.With(writer).Post("/api/apis/{id}/regenerate", h.regenerate)
 	r.With(writer).Delete("/api/apis/{id}", h.deleteAPI)
@@ -96,6 +97,11 @@ func (h handlers) getAPI(w http.ResponseWriter, r *http.Request) {
 func (h handlers) schema(w http.ResponseWriter, r *http.Request) {
 	s, err := h.d.APIs.GraphQLSchema(r.Context(), who(r).Workspace, chi.URLParam(r, "id"))
 	respond(w, r, http.StatusOK, s, err)
+}
+
+func (h handlers) openapi(w http.ResponseWriter, r *http.Request) {
+	doc, err := h.d.APIs.OpenAPI(r.Context(), who(r).Workspace, chi.URLParam(r, "id"))
+	respond(w, r, http.StatusOK, doc, err)
 }
 
 func (h handlers) generate(w http.ResponseWriter, r *http.Request) {

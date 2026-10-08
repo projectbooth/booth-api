@@ -1,6 +1,7 @@
 # 0003: GraphQL schema generation, paging and limits: what was built, and where it differs from the note
 
-Date: 2026-10-07. Builds `docs/design-v0.md` §3 (accepted as written). Most of it is exactly the
+Date: 2026-10-07. Builds `docs/design-v0.md` §3 (accepted as written). (Since 0004 the model,
+filters, paging and shared limits live in `internal/table`, used by REST too; nothing below changed.) Most of it is exactly the
 note; the differences and additions are listed so they can be checked rather than found.
 
 ## Built as the note says

@@ -1,0 +1,7 @@
+# Lint config for the generated OpenAPI document (internal/rest), used by CI's `go` job.
+# Redocly's recommended rules, minus one that doesn't apply: a generated per-dataset API has no
+# license of its own to state.
+extends:
+  - recommended
+rules:
+  info-license: off

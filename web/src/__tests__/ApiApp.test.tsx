@@ -84,6 +84,17 @@ describe("ApiApp", () => {
     expect(screen.getByText(/blob \(bytea\)/)).toBeInTheDocument();
   });
 
+  it("shows an API's OpenAPI document", async () => {
+    mockFetch({
+      ...base,
+      "GET /modules/api/api/apis/api-1/openapi": () => ({ status: 200, body: { openapi: "3.1.0", paths: { "/rows": {} } } }),
+    });
+    const user = userEvent.setup();
+    render(<ApiApp workspace="acme" role="viewer" theme="light" getAccessToken={() => "tok"} />);
+    await user.click(await screen.findByRole("button", { name: "Show OpenAPI document" }));
+    expect(await screen.findByText(/"openapi": "3.1.0"/)).toBeInTheDocument();
+  });
+
   it("shows a viewer the APIs read-only and never asks for keys", async () => {
     const calls = mockFetch(base);
     render(<ApiApp workspace="acme" role="viewer" theme="light" getAccessToken={() => "tok"} />);
