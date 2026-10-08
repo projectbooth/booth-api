@@ -32,11 +32,13 @@ Built (details and the choices made: `docs/decisions/0001-keys-and-api-definitio
   `publicRoutes: [/v1/]`), and booth-api checks the API key, the API's workspace and the key's
   dataset scope, returning its own 401/403/404. `X-Booth-*` headers are never read there.
 
-Not built yet, and why:
+- Reading workspace data (`internal/sidecars`, `internal/workload`, `docs/decisions/0006`): a
+  workload token per workspace and key creator (ADR 0103), one booth-core credential-sidecar
+  process per such pair on a private Unix socket, pooled connections, renewal, idle shutdown. On
+  when `core.url` is set; without it data requests answer 503.
 
-- **Reading workspace data.** Every data request needs a per-workspace credential sidecar under a
-  workload token owned by the key's creator (ADR 0103): the next change. Until then data requests
-  and API generation answer 503; keys, scope and the schema documents work.
+Not built yet: a cross-module integration test against real booth-core, booth-database and
+booth-catalog (the next step).
 
 ## Judgment calls in the scaffold (see also `docs/decisions/`)
 
@@ -64,6 +66,8 @@ Not built yet, and why:
 | `internal/gql` | GraphQL schema generation, limits, execution, introspection |
 | `internal/rest` | REST handler and OpenAPI document |
 | `internal/public` | Key-authenticated public path serving both protocols |
+| `internal/workload` | Workload-token minting client (ADR 0103) |
+| `internal/sidecars` | Per-workspace-and-creator credential sidecars and their pools |
 | `internal/catalog` | booth-catalog client, through core's gateway as the caller |
 | `internal/source` | Table introspection; per-workspace pools (not wired yet) |
 | `internal/keys` | Key format, hashing, issue/revoke/verify |

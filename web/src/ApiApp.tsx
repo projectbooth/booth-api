@@ -407,6 +407,9 @@ function IssuedPanel({ issued, onDone }: { issued: IssuedKey; onDone: () => void
   return (
     <div role="alert" className="rounded-md border border-amber-300 bg-amber-50 px-4 py-3 dark:border-amber-700 dark:bg-amber-950">
       <p className="text-sm font-medium text-amber-900 dark:text-amber-100">Copy “{issued.name}” now. It won&apos;t be shown again.</p>
+      <p className="mt-1 text-xs text-amber-900 dark:text-amber-100">
+        It reads data as you: it stops working if you lose access to this workspace or don&apos;t sign in to Booth for 7 days (the default).
+      </p>
       <code className="mt-2 block break-all rounded bg-white px-2 py-1.5 font-mono text-xs text-slate-900 dark:bg-slate-900 dark:text-slate-100">{issued.secret}</code>
       <div className="mt-3 flex gap-2">
         <Button

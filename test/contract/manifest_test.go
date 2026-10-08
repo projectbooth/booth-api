@@ -8,6 +8,7 @@ package contract
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -222,10 +223,58 @@ func TestManifest_PublicRoutes(t *testing.T) {
 	}
 }
 
-// ADR 0103 item 4: no workload-token minting in this change; it arrives with the data path.
-func TestManifest_NotYet(t *testing.T) {
+// ADR 0103: workload minting is declared exactly when the data path can work (core.url set), and
+// the deployment then reads the minting Secret core delivers and gives the sidecars an in-memory
+// directory (the root filesystem is read-only).
+func TestChart_DataAccess(t *testing.T) {
 	requireHelm(t)
-	if out := string(helmTemplate(t, "--show-only", "templates/boothmodule.yaml")); strings.Contains(out, "workloadIdentity") {
-		t.Error("manifest declares workloadIdentity before the data path is built")
+	off := string(helmTemplate(t))
+	if strings.Contains(off, "workloadIdentity") || strings.Contains(off, "booth-workload-minting-credentials") {
+		t.Error("workload minting rendered without core.url")
+	}
+	on := helmTemplate(t, "--set", "core.url=http://booth-core.booth-system.svc:8080")
+	if !strings.Contains(string(on), "workloadIdentity:\n    mint: true") {
+		t.Error("core.url set but the manifest doesn't declare workloadIdentity.mint")
+	}
+	var dep map[string]any
+	for _, d := range docs(t, on) {
+		if d["kind"] == "Deployment" {
+			dep = d
+		}
+	}
+	spec := dep["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	c := spec["containers"].([]any)[0].(map[string]any)
+	refs := map[string]string{}
+	for _, e := range c["env"].([]any) {
+		ev := e.(map[string]any)
+		if vf, ok := ev["valueFrom"].(map[string]any); ok {
+			ref := vf["secretKeyRef"].(map[string]any)
+			refs[ev["name"].(string)] = ref["name"].(string) + "/" + ref["key"].(string)
+		}
+	}
+	if refs["BOOTH_WORKLOAD_MINT_URL"] != "booth-workload-minting-credentials/url" || refs["BOOTH_WORKLOAD_MINT_CREDENTIAL"] != "booth-workload-minting-credentials/credential" {
+		t.Errorf("minting env = %v", refs)
+	}
+	vol := spec["volumes"].([]any)[0].(map[string]any)
+	if ed, _ := vol["emptyDir"].(map[string]any); ed["medium"] != "Memory" {
+		t.Errorf("sidecar volume = %v, want an in-memory emptyDir", vol)
+	}
+	if fmt.Sprint(c["volumeMounts"]) != "[map[mountPath:/run/booth-api name:sidecars]]" {
+		t.Errorf("mounts = %v", c["volumeMounts"])
+	}
+}
+
+// ADR 0095: the credential sidecar is taken from booth-core's image by digest, never a tag.
+func TestDockerfile_SidecarPinnedByDigest(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	re := regexp.MustCompile(`(?m)^FROM ghcr\.io/projectbooth/credential-sidecar@sha256:[0-9a-f]{64} AS sidecar$`)
+	if !re.Match(b) {
+		t.Error("Dockerfile doesn't take credential-sidecar from a digest-pinned image")
+	}
+	if !strings.Contains(string(b), "COPY --from=sidecar /credential-sidecar /credential-sidecar") {
+		t.Error("Dockerfile doesn't copy the sidecar binary to /credential-sidecar (config's default)")
 	}
 }

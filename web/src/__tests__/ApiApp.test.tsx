@@ -153,6 +153,7 @@ describe("ApiApp", () => {
     await user.click(screen.getByRole("checkbox", { name: "Orders" }));
     await user.click(screen.getByRole("button", { name: "Create key" }));
     expect(await screen.findByText(secret)).toBeInTheDocument();
+    expect(screen.getByText(/don.t sign in to Booth for 7 days/)).toBeInTheDocument();
     expect(calls.find((c) => c.method === "POST")?.body).toEqual({ name: "export", datasetIds: ["ds-orders"] });
     await user.click(screen.getByRole("button", { name: "Done" }));
     expect(screen.queryByText(secret)).not.toBeInTheDocument();

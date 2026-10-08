@@ -3,10 +3,10 @@
 # What this module is (ADR 0100): turns a catalog dataset into a read-only REST + GraphQL API,
 # reachable by holders of an API key this module issues, hashes, scopes to datasets and revokes.
 #
-# Built so far: the management API behind the module's UI (generate API definitions, issue and
-# revoke keys). Not yet: the generated endpoints on core's public routes (ADR 0101, waiting on
-# core) and the credential-sidecar path for reading workspace data (ADR 0103, waiting on core's
-# confirmation of the minting bound), so generating an API answers 503 for now.
+# The management API behind the module's UI (generate APIs, issue and revoke keys) and the
+# generated endpoints on core's public route (ADR 0101). Reading workspace data (ADR 0103) needs
+# core.url: the chart then declares workloadIdentity.mint and booth-api runs a credential sidecar
+# per workspace and key creator. Without it, data requests answer 503.
 
 replicaCount: 1
 
@@ -30,8 +30,14 @@ oidc:
 core:
   # booth-core's in-cluster base URL, e.g. http://booth-core.booth-system.svc.cluster.local:8080.
   # booth-api reads catalog datasets through core's gateway with the caller's own token (ADR 0007).
-  # Empty: generating an API fails with a clear error; key management still works.
+  # Empty: generating an API fails with a clear error and data requests answer 503; key management
+  # still works.
   url: ""
+
+dataAccess:
+  # A workspace's credential sidecar is stopped after this long with no request (it starts again
+  # on the next one, which then waits a few seconds for a lease).
+  idle: 10m
 
 podSecurityContext:
   runAsNonRoot: true

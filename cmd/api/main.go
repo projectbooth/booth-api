@@ -26,8 +26,10 @@ import (
 	"github.com/projectbooth/booth-api/internal/keys"
 	"github.com/projectbooth/booth-api/internal/public"
 	"github.com/projectbooth/booth-api/internal/server"
+	"github.com/projectbooth/booth-api/internal/sidecars"
 	"github.com/projectbooth/booth-api/internal/source"
 	"github.com/projectbooth/booth-api/internal/store"
+	"github.com/projectbooth/booth-api/internal/workload"
 )
 
 const shutdownTimeout = 10 * time.Second
@@ -79,9 +81,23 @@ func run() error {
 	}
 
 	st := store.New(pool)
-	// No workspace data path yet (ADR 0103, the next change): generating an API and every data
-	// request on the public route answer 503 saying so. Keys, scope and the schema documents work.
+	// Workspace data (ADR 0103): one credential-sidecar process per workspace and key creator,
+	// under a workload token core mints for that creator. Without the minting Secret, data requests
+	// and API generation answer 503; keys, scope and the schema documents still work.
 	var pools source.Pools = source.Unavailable{}
+	if cfg.DataAccess() {
+		mgr, err := sidecars.New(sidecars.Config{
+			Binary: cfg.SidecarBinary, Dir: cfg.SidecarDir, CoreURL: cfg.CoreURL, Idle: cfg.SidecarIdle,
+		}, &workload.Minter{URL: cfg.MintURL, Credential: cfg.MintCredential})
+		if err != nil {
+			return fmt.Errorf("starting the sidecar manager: %w", err)
+		}
+		defer mgr.Close()
+		pools = mgr
+		log.Printf("data access: credential sidecars from %s, idle shutdown after %s", cfg.SidecarBinary, cfg.SidecarIdle)
+	} else {
+		log.Print("WARNING: no workload minting credential; reading workspace data is off (data requests answer 503)")
+	}
 	httpServer := &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: server.NewRouter(server.Deps{

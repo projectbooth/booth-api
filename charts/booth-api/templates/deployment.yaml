@@ -45,6 +45,22 @@ spec:
             {{- with .Values.core.url }}
             - name: BOOTH_CORE_URL
               value: {{ . | quote }}
+            # ADR 0103: written by core because the manifest declares workloadIdentity.mint. The
+            # pod may wait in CreateContainerConfigError until core has written it.
+            - name: BOOTH_WORKLOAD_MINT_URL
+              valueFrom:
+                secretKeyRef:
+                  name: booth-workload-minting-credentials
+                  key: url
+            - name: BOOTH_WORKLOAD_MINT_CREDENTIAL
+              valueFrom:
+                secretKeyRef:
+                  name: booth-workload-minting-credentials
+                  key: credential
+            - name: BOOTH_SIDECAR_DIR
+              value: /run/booth-api/sidecars
+            - name: BOOTH_SIDECAR_IDLE
+              value: {{ $.Values.dataAccess.idle | quote }}
             {{- end }}
             {{- with .Values.oidc.issuerUrl }}
             # The management API verifies tokens itself (ADR 0041).
@@ -67,5 +83,19 @@ spec:
             httpGet:
               path: /healthz
               port: http
+          {{- if .Values.core.url }}
+          # Token files and Unix sockets for the per-workspace sidecars: in memory, private to
+          # this pod, gone when it stops (the root filesystem is read-only).
+          volumeMounts:
+            - name: sidecars
+              mountPath: /run/booth-api
+          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+      {{- if .Values.core.url }}
+      volumes:
+        - name: sidecars
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+      {{- end }}
