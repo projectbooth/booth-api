@@ -35,20 +35,22 @@ func TestNewKeyRoundTrips(t *testing.T) {
 
 func TestParseRejects(t *testing.T) {
 	_, good, _, _ := newKey()
-	for _, bad := range []string{
-		"",
-		"booth_ak_",
-		strings.TrimPrefix(good, Prefix), // no prefix
-		"Bearer " + good,                 // header value, not a key
-		strings.Replace(good, Prefix, "booth_xx_", 1), // wrong prefix
-		good[:len(good)-1], // truncated secret
-		good + "A",         // over-long secret
-		Prefix + "AAAAAAAAAAAAA_" + good[len(Prefix)+idLen+1:], // uppercase id
-		Prefix + "aaaaaaaaaaaa1_" + good[len(Prefix)+idLen+1:], // '1' is not base32
-		"eyJhbGciOiJSUzI1NiJ9.e30.sig",                         // a JWT
-	} {
+	secret := good[len(Prefix)+idLen+1:]
+	cases := map[string]string{
+		"empty":                "",
+		"prefix only":          "booth_ak_",
+		"no prefix":            strings.TrimPrefix(good, Prefix),
+		"whole header value":   "Bearer " + good,
+		"wrong prefix":         strings.Replace(good, Prefix, "booth_xx_", 1),
+		"truncated secret":     good[:len(good)-1],
+		"over-long secret":     good + "A",
+		"uppercase id":         Prefix + "AAAAAAAAAAAAA_" + secret,
+		"'1' is not in base32": Prefix + "aaaaaaaaaaaa1_" + secret,
+		"a JWT":                "eyJhbGciOiJSUzI1NiJ9.e30.sig",
+	}
+	for name, bad := range cases {
 		if _, _, err := parse(bad); err == nil {
-			t.Errorf("parse(%q) accepted", bad)
+			t.Errorf("%s: parse(%q) accepted", name, bad)
 		}
 	}
 }
