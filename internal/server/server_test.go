@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 )
 
@@ -20,10 +21,16 @@ func get(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
 }
 
 func TestHealthz(t *testing.T) {
-	if rec := get(t, NewRouter(Deps{DB: fakeDB{}}), "/healthz"); rec.Code != http.StatusOK {
+	var ready atomic.Bool
+	h := NewRouter(Deps{DB: fakeDB{}, Ready: &ready})
+	if rec := get(t, h, "/healthz"); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("before migrations: /healthz = %d, want 503", rec.Code)
+	}
+	ready.Store(true)
+	if rec := get(t, h, "/healthz"); rec.Code != http.StatusOK {
 		t.Errorf("healthy DB: /healthz = %d", rec.Code)
 	}
-	if rec := get(t, NewRouter(Deps{DB: fakeDB{err: errors.New("down")}}), "/healthz"); rec.Code != http.StatusServiceUnavailable {
+	if rec := get(t, NewRouter(Deps{DB: fakeDB{err: errors.New("down")}, Ready: &ready}), "/healthz"); rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("DB down: /healthz = %d, want 503", rec.Code)
 	}
 }
@@ -34,13 +41,19 @@ func TestLivezIgnoresDatabase(t *testing.T) {
 	}
 }
 
-// Nothing beyond the probes is served until the key path and data layer are built (ADR 0100,
-// README.md): an unbuilt route must 404, not fall through to something permissive.
-func TestNoOtherRoutes(t *testing.T) {
-	h := NewRouter(Deps{DB: fakeDB{}})
-	for _, p := range []string{"/", "/api/keys", "/v1/datasets/x", "/graphql"} {
-		if rec := get(t, h, p); rec.Code != http.StatusNotFound {
-			t.Errorf("%s = %d, want 404", p, rec.Code)
+// Only /api/* reaches the management API. Generated endpoints aren't mounted until core's public
+// routes exist (ADR 0101), so their paths must 404 rather than fall through to anything.
+func TestRoutes(t *testing.T) {
+	var hit string
+	api := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { hit = r.URL.Path })
+	h := NewRouter(Deps{DB: fakeDB{}, API: api})
+	if get(t, h, "/api/keys"); hit != "/api/keys" {
+		t.Errorf("/api/keys not routed to the management API (hit %q)", hit)
+	}
+	for _, p := range []string{"/", "/v1/orders/rows", "/public/v1/x", "/graphql"} {
+		hit = ""
+		if rec := get(t, h, p); rec.Code != http.StatusNotFound || hit != "" {
+			t.Errorf("%s = %d (hit %q), want 404", p, rec.Code, hit)
 		}
 	}
 }

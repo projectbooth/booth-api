@@ -1,14 +1,13 @@
-// Package server assembles booth-api's HTTP surface. At scaffold stage it serves only the two
-// probes; the module's own management API (/api/*, OIDC-verified, ADR 0041) and the generated
-// endpoints (API-key-authenticated, ADR 0100) are mounted here once they are built. The generated
-// endpoints wait on a contract note for how core's gateway reaches them without an OIDC session
-// (README.md, "Not built yet").
+// Package server assembles booth-api's HTTP surface: the probes, and the management API at /api/
+// (internal/api) that the module's UI calls through booth-core's gateway. The generated endpoints
+// are served on core's public routes (ADR 0101) and are mounted here once core's change lands.
 package server
 
 import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -22,6 +21,11 @@ type Pinger interface {
 // Deps is what the router needs.
 type Deps struct {
 	DB Pinger
+	// Ready flips true once the store's migrations have applied; until then /healthz reports
+	// unready, so a pod is never routed to before its tables exist.
+	Ready *atomic.Bool
+	// API is the management API (internal/api), mounted at /api/. Nil mounts nothing.
+	API http.Handler
 }
 
 // NewRouter builds the HTTP handler.
@@ -42,9 +46,16 @@ func NewRouter(d Deps) http.Handler {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "unavailable", "reason": "database unreachable"})
 			return
 		}
+		if d.Ready != nil && !d.Ready.Load() {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "starting"})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
+	if d.API != nil {
+		r.Handle("/api/*", d.API)
+	}
 	return r
 }
 

@@ -29,10 +29,21 @@ jobs:
           go mod tidy
           git diff --exit-code go.mod go.sum
       - run: go vet ./...
+      # The store, key and introspection tests run against a REAL PostgreSQL (hack/docker-compose.yml):
+      # hashing, scoping, revocation and workspace isolation are enforced in SQL, and introspection
+      # reads the system catalogs. BOOTH_TEST_REQUIRE_* make a missing dependency fail, not skip.
+      - name: Start PostgreSQL
+        run: docker compose -f hack/docker-compose.yml up -d --wait
       - name: Unit + contract tests
         env:
           BOOTH_TEST_REQUIRE_HELM: "1"
-        run: go test -race -count=1 ./...
+          BOOTH_TEST_REQUIRE_POSTGRES: "1"
+        run: |
+          eval "$(sh hack/test-env.sh)"
+          go test -race -count=1 ./...
+      - name: PostgreSQL logs on failure
+        if: failure()
+        run: docker compose -f hack/docker-compose.yml logs --tail=100
 
   web:
     # @projectbooth/api-ui (ADR 0030): the module's native UI package.

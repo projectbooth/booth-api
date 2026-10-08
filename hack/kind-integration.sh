@@ -79,6 +79,21 @@ kubectl -n "$NS" get boothmodule api -o jsonpath='{.spec.id} navPath={.spec.navP
 echo "--- readiness against the real database (helm --wait already required it):"
 kubectl -n "$NS" get deploy a-booth-api -o jsonpath='{.status.readyReplicas}/{.spec.replicas} ready{"\n"}'
 
+echo "--- migrations applied in the module's own database (readiness waits for them):"
+tables=$(kubectl -n "$NS" exec pg -- psql -U booth_mod_api -d booth_mod_api -AtXc \
+  "select string_agg(table_name, ',' order by table_name) from information_schema.tables where table_schema = 'public'")
+echo "$tables"
+[ "$tables" = "api_key_datasets,api_keys,api_schema_migrations,apis" ] || { echo "unexpected tables: $tables"; exit 1; }
+
+echo "--- with no OIDC configured, the management API refuses (503) rather than letting anyone in:"
+kubectl -n "$NS" port-forward deploy/a-booth-api 18080:8080 >/dev/null 2>&1 &
+pf=$!
+for _ in $(seq 30); do curl -fs localhost:18080/livez >/dev/null 2>&1 && break; sleep 1; done
+code=$(curl -s -o /dev/null -w '%{http_code}' localhost:18080/api/keys)
+kill "$pf" 2>/dev/null || true
+[ "$code" = 503 ] || { echo "GET /api/keys answered $code, want 503"; exit 1; }
+echo "GET /api/keys: 503"
+
 echo "--- /healthz goes unready when the database goes away, and recovers:"
 pod=$(kubectl -n "$NS" get pod -l app.kubernetes.io/component=api -o jsonpath='{.items[0].metadata.name}')
 kubectl -n "$NS" delete pod pg --wait

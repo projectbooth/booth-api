@@ -24,6 +24,25 @@ export default defineConfig(({ command }) => ({
           },
         }
       : undefined,
+  server: {
+    proxy: {
+      // Local dev only: booth-core's gateway normally proxies /modules/api/* to this module,
+      // validating the browser's X-Workspace and forwarding it as X-Booth-Workspace (ADR 0025). The
+      // proxy mimics both, so the harness works against a locally running backend
+      // (BOOTH_API_DEV_BACKEND). Catalog calls (/modules/catalog/*) need a real gateway.
+      "/modules/api": {
+        target: process.env.BOOTH_API_DEV_BACKEND ?? "http://localhost:8080",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/modules\/api/, ""),
+        configure: (proxy) => {
+          proxy.on("proxyReq", (proxyReq, req) => {
+            const ws = req.headers["x-workspace"];
+            if (typeof ws === "string" && ws !== "") proxyReq.setHeader("X-Booth-Workspace", ws);
+          });
+        },
+      },
+    },
+  },
   test: {
     environment: "jsdom",
     globals: true,
