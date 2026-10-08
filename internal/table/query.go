@@ -55,20 +55,44 @@ type DB interface {
 
 // WithTx runs fn in a READ ONLY transaction with a statement timeout: the lease is read-only
 // already (ADR 0103), this makes it so even if one weren't. A timeout is reported as an *Error.
+//
+// A connection through the credential sidecar can end at any lease boundary
+// (contracts/credential-sidecar.md, "Connection lifetime"), and a pooled one may be found dead
+// only when used. If starting the transaction fails that way, before fn has run anything, it is
+// retried once on a fresh connection; a failure inside fn is not retried.
 func WithTx(ctx context.Context, db DB, timeout time.Duration, fn func(pgx.Tx) error) error {
-	tx, err := db.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	tx, err := begin(ctx, db, timeout)
+	if err != nil && isConnectionError(err) && ctx.Err() == nil {
+		tx, err = begin(ctx, db, timeout)
+	}
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(context.Background()) //nolint:errcheck // nothing to keep; read-only
-	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = %d", timeout.Milliseconds())); err != nil {
-		return err
-	}
 	err = fn(tx)
 	if err != nil && (errors.Is(err, context.DeadlineExceeded) || isStatementTimeout(err)) {
 		return &Error{Msg: fmt.Sprintf("the query took longer than %s and was cancelled", timeout), Timeout: true}
 	}
 	return err
+}
+
+// isConnectionError: anything but an error the server itself reported. begin only issues
+// BEGIN READ ONLY and SET LOCAL, so repeating it after any such failure changes nothing.
+func isConnectionError(err error) bool {
+	var pgErr *pgconn.PgError
+	return !errors.As(err, &pgErr)
+}
+
+func begin(ctx context.Context, db DB, timeout time.Duration) (pgx.Tx, error) {
+	tx, err := db.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = %d", timeout.Milliseconds())); err != nil {
+		_ = tx.Rollback(context.Background())
+		return nil, err
+	}
+	return tx, nil
 }
 
 // ---- limits -----------------------------------------------------------------------------------

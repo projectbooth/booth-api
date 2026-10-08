@@ -34,6 +34,14 @@ spec:
   publicRoutes:
     pathPrefixes:
       - /v1/
+  {{- if .Values.core.url }}
+  # ADR 0103: booth-api mints a workload token per workspace and key creator (subject
+  # apikeys:<workspace>, roleCeiling viewer) for the credential sidecar that reads the workspace's
+  # database. Core refuses a mint unless the creator holds a current role in that workspace. Only
+  # declared with core.url, since the sidecar calls core's broker.
+  workloadIdentity:
+    mint: true
+  {{- end }}
   serviceRef:
     name: {{ include "booth-api.fullname" . }}
     port: {{ .Values.service.port }}

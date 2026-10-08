@@ -21,6 +21,30 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 }
 
+func TestLoad_DataAccess(t *testing.T) {
+	t.Setenv("BOOTH_API_DATABASE_DSN", "postgres://u:p@h/db")
+	cfg, err := Load()
+	if err != nil || cfg.DataAccess() || cfg.SidecarBinary != "/credential-sidecar" || cfg.SidecarIdle.String() != "10m0s" {
+		t.Fatalf("defaults: %+v %v", cfg, err)
+	}
+	t.Setenv("BOOTH_WORKLOAD_MINT_URL", "http://core/api/internal/workload-tokens")
+	if _, err := Load(); err == nil {
+		t.Error("a mint URL without a credential was accepted")
+	}
+	t.Setenv("BOOTH_WORKLOAD_MINT_CREDENTIAL", "wl.api.x")
+	if _, err := Load(); err == nil {
+		t.Error("data access without a core URL was accepted")
+	}
+	t.Setenv("BOOTH_CORE_URL", "http://core")
+	if cfg, err := Load(); err != nil || !cfg.DataAccess() {
+		t.Errorf("configured: %+v %v", cfg, err)
+	}
+	t.Setenv("BOOTH_SIDECAR_IDLE", "soon")
+	if _, err := Load(); err == nil {
+		t.Error("a bad idle duration was accepted")
+	}
+}
+
 func TestLoad_OIDC(t *testing.T) {
 	t.Setenv("BOOTH_API_DATABASE_DSN", "postgres://u:p@h/db")
 	t.Setenv("BOOTH_OIDC_ISSUER_URL", "https://idp.example")
