@@ -23,17 +23,23 @@ var (
 	ErrUnavailable = errors.New("reading workspace databases is not available yet")
 	// ErrTableNotFound: no such table, or not one the workspace's read lease can select from.
 	ErrTableNotFound = errors.New("table not found in the workspace database")
+	// ErrOwnerNoAccess: core refused to mint a workload token for the owner (ADR 0103): they hold
+	// no current role in the workspace, or haven't signed in within core's recency window.
+	ErrOwnerNoAccess = errors.New("this key's creator no longer has access to the workspace, or hasn't signed in to Booth within the last 7 days (the default); ask them to sign in, or issue a new key")
 )
 
-// Pools hands out a connection pool on a workspace's database.
+// Pools hands out a connection pool on a workspace's database, under a workload identity owned by
+// owner (ADR 0103): the key's creator for a public request, the signed-in person when generating.
 type Pools interface {
-	Pool(ctx context.Context, workspace string) (*pgxpool.Pool, error)
+	Pool(ctx context.Context, workspace, owner string) (*pgxpool.Pool, error)
 }
 
-// Unavailable is the production Pools until the sidecar wiring lands.
+// Unavailable is Pools when no data path is configured.
 type Unavailable struct{}
 
-func (Unavailable) Pool(context.Context, string) (*pgxpool.Pool, error) { return nil, ErrUnavailable }
+func (Unavailable) Pool(context.Context, string, string) (*pgxpool.Pool, error) {
+	return nil, ErrUnavailable
+}
 
 // Querier is what Introspect needs: a *pgxpool.Pool or one acquired connection.
 type Querier interface {

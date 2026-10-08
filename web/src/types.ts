@@ -35,6 +35,8 @@ export interface ApiKey {
   createdAt: string;
   revokedAt: string | null;
   revokedBy?: string;
+  /** Last request this key authenticated on a public endpoint (recorded at most once a minute). */
+  lastUsedAt: string | null;
   datasetIds: string[];
 }
 

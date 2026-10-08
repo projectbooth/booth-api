@@ -27,7 +27,9 @@ import (
 // workspace reads the test schema, where the fixture tables live.
 type fixturePools struct{ pool *pgxpool.Pool }
 
-func (f fixturePools) Pool(context.Context, string) (*pgxpool.Pool, error) { return f.pool, nil }
+func (f fixturePools) Pool(context.Context, string, string) (*pgxpool.Pool, error) {
+	return f.pool, nil
+}
 
 type env struct {
 	t       *testing.T

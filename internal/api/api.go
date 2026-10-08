@@ -195,6 +195,8 @@ func respond(w http.ResponseWriter, r *http.Request, status int, v any, err erro
 	case errors.Is(err, apis.ErrUnsupportedFormat), errors.Is(err, apis.ErrNoColumns), errors.Is(err, source.ErrTableNotFound),
 		errors.Is(err, gql.ErrNoFields):
 		auth.WriteError(w, http.StatusUnprocessableEntity, err.Error())
+	case errors.Is(err, source.ErrOwnerNoAccess):
+		auth.WriteError(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, source.ErrUnavailable):
 		auth.WriteError(w, http.StatusServiceUnavailable, err.Error())
 	case errors.Is(err, context.Canceled):

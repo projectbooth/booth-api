@@ -26,6 +26,7 @@ const activeKey: ApiKey = {
   createdByName: "ed",
   createdAt: "2026-10-07T11:00:00Z",
   revokedAt: null,
+  lastUsedAt: null,
   datasetIds: ["ds-orders"],
 };
 
@@ -156,6 +157,18 @@ describe("ApiApp", () => {
     await user.click(screen.getByRole("button", { name: "Done" }));
     expect(screen.queryByText(secret)).not.toBeInTheDocument();
     expect(document.body.textContent).not.toContain("s".repeat(43));
+  });
+
+  it("shows where to call each API and how long its keys keep working", async () => {
+    mockFetch({
+      ...base,
+      "GET /modules/api/api/keys": () => ({ status: 200, body: { items: [{ ...activeKey, lastUsedAt: "2026-10-08T09:00:00Z" }] } }),
+    });
+    render(<ApiApp workspace="acme" role="owner" theme="light" getAccessToken={() => "tok"} />);
+    expect(await screen.findByText(`POST ${window.location.origin}/modules/api/public/v1/orders/graphql`)).toBeInTheDocument();
+    expect(screen.getByText(`GET ${window.location.origin}/modules/api/public/v1/orders/rows`)).toBeInTheDocument();
+    expect(await screen.findByText("Works while ed signs in at least every 7 days")).toBeInTheDocument();
+    expect(screen.queryByText("Never")).not.toBeInTheDocument();
   });
 
   it("revokes a key only after confirming", async () => {

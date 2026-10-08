@@ -2,11 +2,8 @@
 // asking (their own token and workspace): booth-api sees exactly the datasets that person can see,
 // and never holds a standing catalog credential of its own (ADR 0007, ADR 0041).
 //
-// The postgres dataset shape is ADR 0102's (`format: "postgres"` plus a table block naming
-// schema and table), which booth-catalog has not built yet. The JSON field that carries the table
-// block is not final: ADR 0102 says only that it is its own field, not the Iceberg `table` block,
-// and the coordinator records the name once booth-catalog reports it. Until then it is the one
-// constant PostgresTableField below, so adopting the real name is a one-line change.
+// The postgres dataset shape is ADR 0102's: `format: "postgres"` plus `postgresTable: {schema,
+// name}`, as booth-catalog built it (c46f80f, its docs/decisions/0008).
 package catalog
 
 import (
@@ -24,7 +21,6 @@ import (
 )
 
 // PostgresTableField is the dataset JSON field holding a postgres dataset's {schema, name}.
-// PROVISIONAL (see the package comment).
 const PostgresTableField = "postgresTable"
 
 // FormatPostgres is ADR 0102's discriminator value.

@@ -1,6 +1,7 @@
-// Package server assembles booth-api's HTTP surface: the probes, and the management API at /api/
-// (internal/api) that the module's UI calls through booth-core's gateway. The generated endpoints
-// are served on core's public routes (ADR 0101) and are mounted here once core's change lands.
+// Package server assembles booth-api's HTTP surface: the probes, the management API at /api/
+// (internal/api) that the module's UI calls through booth-core's gateway with a person's token, and
+// the generated endpoints at /v1/ (internal/public), which core's gateway reaches as a public route
+// (ADR 0101) and which authenticate by API key.
 package server
 
 import (
@@ -26,6 +27,8 @@ type Deps struct {
 	Ready *atomic.Bool
 	// API is the management API (internal/api), mounted at /api/. Nil mounts nothing.
 	API http.Handler
+	// Public serves the generated endpoints (internal/public), mounted at /v1/. Nil mounts nothing.
+	Public http.Handler
 }
 
 // NewRouter builds the HTTP handler.
@@ -55,6 +58,9 @@ func NewRouter(d Deps) http.Handler {
 
 	if d.API != nil {
 		r.Handle("/api/*", d.API)
+	}
+	if d.Public != nil {
+		r.Handle("/v1/*", d.Public)
 	}
 	return r
 }

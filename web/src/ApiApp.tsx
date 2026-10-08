@@ -51,10 +51,6 @@ export function ApiApp({ workspace, role, theme, getAccessToken }: ApiAppProps) 
         </p>
       </header>
 
-      <Notice>
-        Generated endpoints aren&apos;t reachable yet: serving them needs platform changes that are still being built. You can already define
-        APIs and issue keys; keys issued now will work once endpoints go live.
-      </Notice>
 
       <ApisSection api={api} state={apis.state} reload={apis.reload} canWrite={canWrite} />
       {canWrite && apis.state.status === "ready" && <KeysSection api={api} apis={apis.state.data} />}
@@ -222,9 +218,31 @@ function ApiCard({ api, def, canWrite, onChange }: { api: ApiContext; def: ApiDe
       <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
         Columns as of {formatDate(def.generatedAt)}. The API keeps these until you regenerate it.
       </p>
+      <Endpoints slug={def.slug} />
       <SchemaToggle api={api} id={def.id} generatedAt={def.generatedAt} />
       {error && <ErrorBanner message={error.message} mismatches={error.mismatches} />}
     </Panel>
+  );
+}
+
+/** Where a key holder calls this API: core's public route for this module (ADR 0101). */
+function endpointBase(slug: string, origin: string = window.location.origin): string {
+  return `${origin}/modules/api/public/v1/${slug}`;
+}
+
+function Endpoints({ slug }: { slug: string }) {
+  const base = endpointBase(slug);
+  return (
+    <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+      <dt className="text-slate-500 dark:text-slate-400">REST</dt>
+      <dd className="break-all font-mono">GET {base}/rows</dd>
+      <dt className="text-slate-500 dark:text-slate-400">GraphQL</dt>
+      <dd className="break-all font-mono">POST {base}/graphql</dd>
+      <dt className="text-slate-500 dark:text-slate-400">OpenAPI</dt>
+      <dd className="break-all font-mono">GET {base}/openapi.json</dd>
+      <dt className="text-slate-500 dark:text-slate-400">Auth</dt>
+      <dd className="font-mono">Authorization: Bearer booth_ak_…</dd>
+    </dl>
   );
 }
 
@@ -414,6 +432,7 @@ function KeyTable({ api, keys, names, onChange }: { api: ApiContext; keys: ApiKe
             <th className="py-1 pr-4 font-medium">Name</th>
             <th className="py-1 pr-4 font-medium">Datasets</th>
             <th className="py-1 pr-4 font-medium">Created</th>
+            <th className="py-1 pr-4 font-medium">Last used</th>
             <th className="py-1 pr-4 font-medium">Status</th>
             <th className="py-1 font-medium">
               <span className="sr-only">Actions</span>
@@ -460,7 +479,11 @@ function KeyRow({ api, k, names, onChange }: { api: ApiContext; k: ApiKey; names
       <td className="py-2 pr-4">
         {formatDate(k.createdAt)}
         <div className="text-xs text-slate-500 dark:text-slate-400">by {k.createdByName}</div>
+        {!k.revokedAt && (
+          <div className="text-xs text-slate-500 dark:text-slate-400">Works while {k.createdByName} signs in at least every 7 days</div>
+        )}
       </td>
+      <td className="py-2 pr-4 text-slate-600 dark:text-slate-300">{k.lastUsedAt ? formatDate(k.lastUsedAt) : "Never"}</td>
       <td className="py-2 pr-4">
         {k.revokedAt ? (
           <span className="text-slate-500 dark:text-slate-400">Revoked {formatDate(k.revokedAt)}</span>
@@ -497,14 +520,6 @@ function formatDate(iso: string): string {
 
 function Panel({ children }: { children: ReactNode }) {
   return <div className="rounded-md border border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-900">{children}</div>;
-}
-
-function Notice({ children }: { children: ReactNode }) {
-  return (
-    <div className="rounded-md border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300">
-      {children}
-    </div>
-  );
 }
 
 function Muted({ children }: { children: ReactNode }) {

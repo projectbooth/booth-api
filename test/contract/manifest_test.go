@@ -37,7 +37,10 @@ type boothModule struct {
 		WorkloadIdentity    map[string]any `yaml:"workloadIdentity"`
 		Events              map[string]any `yaml:"events"`
 		ProvidesCredentials map[string]any `yaml:"providesCredentials"`
-		ServiceRef          struct {
+		PublicRoutes        *struct {
+			PathPrefixes []string `yaml:"pathPrefixes"`
+		} `yaml:"publicRoutes"`
+		ServiceRef struct {
 			Name string `yaml:"name"`
 			Port int    `yaml:"port"`
 		} `yaml:"serviceRef"`
@@ -209,15 +212,20 @@ func TestChart_OIDCAndCore(t *testing.T) {
 	}
 }
 
-// ADR 0103 item 4: no workload-token minting until core confirms the membership bound, and no
-// public routes until core's ADR 0101 change lands. Both are deliberate absences, pinned here so
-// neither is added by accident.
+// ADR 0101: exactly one public prefix, /v1/, which is where internal/public is mounted. The
+// contract's grammar requires a leading and trailing slash.
+func TestManifest_PublicRoutes(t *testing.T) {
+	requireHelm(t)
+	m := renderBoothModule(t)
+	if m.Spec.PublicRoutes == nil || strings.Join(m.Spec.PublicRoutes.PathPrefixes, ",") != "/v1/" {
+		t.Errorf("publicRoutes = %+v, want {pathPrefixes: [/v1/]}", m.Spec.PublicRoutes)
+	}
+}
+
+// ADR 0103 item 4: no workload-token minting in this change; it arrives with the data path.
 func TestManifest_NotYet(t *testing.T) {
 	requireHelm(t)
-	out := string(helmTemplate(t, "--show-only", "templates/boothmodule.yaml"))
-	for _, field := range []string{"workloadIdentity", "publicRoutes"} {
-		if strings.Contains(out, field) {
-			t.Errorf("manifest declares %s before it is cleared (ADR 0101/0103)", field)
-		}
+	if out := string(helmTemplate(t, "--show-only", "templates/boothmodule.yaml")); strings.Contains(out, "workloadIdentity") {
+		t.Error("manifest declares workloadIdentity before the data path is built")
 	}
 }
