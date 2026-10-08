@@ -21,6 +21,7 @@ import (
 	"github.com/projectbooth/booth-api/internal/apis"
 	"github.com/projectbooth/booth-api/internal/auth"
 	"github.com/projectbooth/booth-api/internal/catalog"
+	"github.com/projectbooth/booth-api/internal/gql"
 	"github.com/projectbooth/booth-api/internal/keys"
 	"github.com/projectbooth/booth-api/internal/source"
 	"github.com/projectbooth/booth-api/internal/store"
@@ -53,6 +54,7 @@ func NewHandler(d Deps) http.Handler {
 	h := handlers{d}
 	r.Get("/api/apis", h.listAPIs)
 	r.Get("/api/apis/{id}", h.getAPI)
+	r.Get("/api/apis/{id}/schema", h.schema)
 	r.With(writer).Post("/api/apis", h.generate)
 	r.With(writer).Post("/api/apis/{id}/regenerate", h.regenerate)
 	r.With(writer).Delete("/api/apis/{id}", h.deleteAPI)
@@ -89,6 +91,11 @@ func (h handlers) listAPIs(w http.ResponseWriter, r *http.Request) {
 func (h handlers) getAPI(w http.ResponseWriter, r *http.Request) {
 	d, err := h.d.APIs.Get(r.Context(), who(r).Workspace, chi.URLParam(r, "id"))
 	respond(w, r, http.StatusOK, d, err)
+}
+
+func (h handlers) schema(w http.ResponseWriter, r *http.Request) {
+	s, err := h.d.APIs.GraphQLSchema(r.Context(), who(r).Workspace, chi.URLParam(r, "id"))
+	respond(w, r, http.StatusOK, s, err)
 }
 
 func (h handlers) generate(w http.ResponseWriter, r *http.Request) {
@@ -179,7 +186,8 @@ func respond(w http.ResponseWriter, r *http.Request, status int, v any, err erro
 		auth.WriteError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, keys.ErrInvalid):
 		auth.WriteError(w, http.StatusBadRequest, err.Error())
-	case errors.Is(err, apis.ErrUnsupportedFormat), errors.Is(err, apis.ErrNoColumns), errors.Is(err, source.ErrTableNotFound):
+	case errors.Is(err, apis.ErrUnsupportedFormat), errors.Is(err, apis.ErrNoColumns), errors.Is(err, source.ErrTableNotFound),
+		errors.Is(err, gql.ErrNoFields):
 		auth.WriteError(w, http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, source.ErrUnavailable):
 		auth.WriteError(w, http.StatusServiceUnavailable, err.Error())

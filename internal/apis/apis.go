@@ -11,6 +11,7 @@ import (
 	"github.com/projectbooth/booth-api/internal/apidef"
 	"github.com/projectbooth/booth-api/internal/auth"
 	"github.com/projectbooth/booth-api/internal/catalog"
+	"github.com/projectbooth/booth-api/internal/gql"
 	"github.com/projectbooth/booth-api/internal/source"
 )
 
@@ -93,10 +94,41 @@ func (s Service) snapshot(ctx context.Context, workspace string, ds catalog.Data
 	if len(mm) > 0 {
 		return apidef.Definition{}, &apidef.MismatchError{Mismatches: mm}
 	}
-	return apidef.Definition{
+	d := apidef.Definition{
 		Workspace: workspace, DatasetID: ds.ID, DatasetName: ds.Name,
 		Table: *ds.Table, Columns: cols, PrimaryKey: tbl.PrimaryKey,
-	}, nil
+	}
+	// Refuse now rather than store an API that can never serve anything (every column of a type
+	// the API omits, e.g. all bytea).
+	if _, err := gql.New(gql.NewModel(d), gql.DefaultLimits); err != nil {
+		return apidef.Definition{}, err
+	}
+	return d, nil
+}
+
+// Schema is a generated API's GraphQL schema as the endpoint will serve it, plus the columns left
+// out because their types have no faithful mapping (docs/design-v0.md §3).
+type Schema struct {
+	SDL     string        `json:"sdl"`
+	Omitted []gql.Omitted `json:"omitted"`
+}
+
+// GraphQLSchema renders the stored snapshot's schema.
+func (s Service) GraphQLSchema(ctx context.Context, workspace, id string) (Schema, error) {
+	d, err := s.Store.GetAPI(ctx, workspace, id)
+	if err != nil {
+		return Schema{}, err
+	}
+	m := gql.NewModel(d)
+	e, err := gql.New(m, gql.DefaultLimits)
+	if err != nil {
+		return Schema{}, err
+	}
+	omitted := m.Omitted
+	if omitted == nil {
+		omitted = []gql.Omitted{}
+	}
+	return Schema{SDL: e.SDL, Omitted: omitted}, nil
 }
 
 // List returns the workspace's APIs.

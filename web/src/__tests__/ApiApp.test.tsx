@@ -69,6 +69,21 @@ const base = {
 };
 
 describe("ApiApp", () => {
+  it("shows an API's GraphQL schema and the columns it leaves out", async () => {
+    mockFetch({
+      ...base,
+      "GET /modules/api/api/apis/api-1/schema": () => ({
+        status: 200,
+        body: { sdl: "type Row {\n  id: BigInt!\n}", omitted: [{ column: "blob", type: "bytea" }] },
+      }),
+    });
+    const user = userEvent.setup();
+    render(<ApiApp workspace="acme" role="viewer" theme="light" getAccessToken={() => "tok"} />);
+    await user.click(await screen.findByRole("button", { name: "Show GraphQL schema" }));
+    expect(await screen.findByText(/id: BigInt!/)).toBeInTheDocument();
+    expect(screen.getByText(/blob \(bytea\)/)).toBeInTheDocument();
+  });
+
   it("shows a viewer the APIs read-only and never asks for keys", async () => {
     const calls = mockFetch(base);
     render(<ApiApp workspace="acme" role="viewer" theme="light" getAccessToken={() => "tok"} />);

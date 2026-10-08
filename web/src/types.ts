@@ -54,3 +54,10 @@ export interface CatalogDataset {
   name: string;
   format?: string;
 }
+
+/** GET /api/apis/{id}/schema: the GraphQL schema the endpoint will serve. */
+export interface GraphQLSchema {
+  sdl: string;
+  /** Columns left out because their type has no faithful GraphQL mapping (e.g. bytea). */
+  omitted: { column: string; type: string }[];
+}
