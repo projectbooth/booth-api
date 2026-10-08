@@ -6,3 +6,4 @@ hack
 test
 **/*_test.go
 web
+siblings

@@ -1,0 +1,57 @@
+# Throwaway single-instance Keycloak for the real-stack integration test (dev mode, embedded H2).
+# Copied from booth-e2e/bringup/keycloak.yaml (the same file booth-logging's real-core job uses).
+# The realm comes from the keycloak-realm ConfigMap deploy.sh renders from realm-booth.json.tpl.
+#
+# No KC_HOSTNAME on purpose: in dev mode the token `iss` follows the request's Host header, so a
+# request to keycloak.keycloak.svc:8080 yields exactly the issuer the Booth charts are given.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: keycloak
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: keycloak}
+  template:
+    metadata:
+      labels: {app: keycloak}
+    spec:
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:26.0
+          args: ["start-dev", "--import-realm"]
+          env:
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              value: admin
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: keycloak-admin, key: password}
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: {path: /realms/booth, port: 8080}
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            failureThreshold: 60
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+          volumeMounts:
+            - name: realm
+              mountPath: /opt/keycloak/data/import
+      volumes:
+        - name: realm
+          configMap:
+            name: keycloak-realm
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: keycloak
+spec:
+  selector: {app: keycloak}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

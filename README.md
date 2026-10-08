@@ -37,8 +37,9 @@ Built (details and the choices made: `docs/decisions/0001-keys-and-api-definitio
   process per such pair on a private Unix socket, pooled connections, renewal, idle shutdown. On
   when `core.url` is set; without it data requests answer 503.
 
-Not built yet: a cross-module integration test against real booth-core, booth-database and
-booth-catalog (the next step).
+- A real-stack integration test (`hack/realstack-integration.sh`, `docs/decisions/0007`) against real
+  Keycloak, booth-core, booth-database and booth-catalog on kind: keys, scope, workspace isolation,
+  revocation and a creator losing access, all through core's gateway and public route.
 
 ## Judgment calls in the scaffold (see also `docs/decisions/`)
 
@@ -85,7 +86,7 @@ booth-catalog (the next step).
 | Layer | Where | When |
 |---|---|---|
 | Unit + contract | `.github/workflows/ci.yml`: `go` (gofmt, tidy, vet, `go test -race` against a real PostgreSQL from `hack/docker-compose.yml`, contract tests rendering the chart with helm, Redocly lint of the generated OpenAPI document), `web` (typecheck, lint, vitest, build), `helm-lint`, `image` (Docker build, not pushed) | Every push and PR; required by branch protection on `main` |
-| Real cluster | `.github/workflows/integration.yml` runs `hack/kind-integration.sh` | Merge to `main`, nightly, manual |
+| Real cluster | `.github/workflows/integration.yml`: `kind` runs `hack/kind-integration.sh` (this chart alone); `realstack` runs `hack/realstack-integration.sh` (real core, booth-database, booth-catalog at pinned commits) | Merge to `main`, nightly, manual |
 | Cross-repo e2e | `booth-e2e` | Owned there |
 
 The kind test installs the chart against booth-core's real CRD schema and a real PostgreSQL
