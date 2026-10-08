@@ -54,10 +54,14 @@ func requireHelm(t *testing.T) {
 	}
 }
 
+func runHelm(extra ...string) ([]byte, error) {
+	args := append([]string{"template", "a", filepath.Join("..", "..", "charts", "booth-api"), "--namespace", "booth-api"}, extra...)
+	return exec.Command("helm", args...).CombinedOutput()
+}
+
 func helmTemplate(t *testing.T, extra ...string) []byte {
 	t.Helper()
-	args := append([]string{"template", "a", filepath.Join("..", "..", "charts", "booth-api"), "--namespace", "booth-api"}, extra...)
-	out, err := exec.Command("helm", args...).CombinedOutput()
+	out, err := runHelm(extra...)
 	if err != nil {
 		t.Fatalf("helm template failed: %v\n%s", err, out)
 	}
@@ -181,5 +185,39 @@ func TestChart_PodHardening(t *testing.T) {
 	}
 	if !fromSecret {
 		t.Error("BOOTH_API_DATABASE_DSN is not read from booth-database-credentials/dsn")
+	}
+}
+
+// The management API verifies tokens against the same OIDC provider core uses (ADR 0041), and reads
+// the catalog through core's gateway. Nothing renders unless configured; an issuer without a client
+// id fails the render.
+func TestChart_OIDCAndCore(t *testing.T) {
+	requireHelm(t)
+	if s := string(helmTemplate(t)); strings.Contains(s, "BOOTH_OIDC_ISSUER_URL") || strings.Contains(s, "BOOTH_CORE_URL") {
+		t.Error("OIDC or core settings rendered without being configured")
+	}
+	s := string(helmTemplate(t, "--set", "oidc.issuerUrl=https://idp.example/realms/booth", "--set", "oidc.clientId=booth",
+		"--set", "core.url=http://booth-core.booth-system.svc:8080"))
+	for _, want := range []string{"BOOTH_OIDC_ISSUER_URL", `value: "https://idp.example/realms/booth"`, "BOOTH_OIDC_GROUPS_CLAIM",
+		"BOOTH_OIDC_REQUIRE_AUDIENCE", "BOOTH_CORE_URL", `value: "http://booth-core.booth-system.svc:8080"`} {
+		if !strings.Contains(s, want) {
+			t.Errorf("render lacks %s", want)
+		}
+	}
+	if out, err := runHelm("--set", "oidc.issuerUrl=https://idp.example"); err == nil {
+		t.Errorf("rendered an issuer with no client id:\n%.200s", out)
+	}
+}
+
+// ADR 0103 item 4: no workload-token minting until core confirms the membership bound, and no
+// public routes until core's ADR 0101 change lands. Both are deliberate absences, pinned here so
+// neither is added by accident.
+func TestManifest_NotYet(t *testing.T) {
+	requireHelm(t)
+	out := string(helmTemplate(t, "--show-only", "templates/boothmodule.yaml"))
+	for _, field := range []string{"workloadIdentity", "publicRoutes"} {
+		if strings.Contains(out, field) {
+			t.Errorf("manifest declares %s before it is cleared (ADR 0101/0103)", field)
+		}
 	}
 }

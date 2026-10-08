@@ -3,9 +3,10 @@
 # What this module is (ADR 0100): turns a catalog dataset into a read-only REST + GraphQL API,
 # reachable by holders of an API key this module issues, hashes, scopes to datasets and revokes.
 #
-# Scaffold stage: the chart deploys the service, its BoothModule registration and its own
-# database connection. The OIDC settings for its management API, the API-key path and the
-# credential-sidecar wiring for reading workspace data (ADR 0095) are added when they are built.
+# Built so far: the management API behind the module's UI (generate API definitions, issue and
+# revoke keys). Not yet: the generated endpoints on core's public routes (ADR 0101, waiting on
+# core) and the credential-sidecar path for reading workspace data (ADR 0103, waiting on core's
+# confirmation of the minting bound), so generating an API answers 503 for now.
 
 replicaCount: 1
 
@@ -16,6 +17,21 @@ image:
 
 service:
   port: 8080
+
+oidc:
+  # The management API verifies each caller's token itself (ADR 0041), against the same OIDC
+  # provider and client booth-core uses. Left empty, the API answers 503.
+  issuerUrl: ""
+  clientId: ""
+  requireAudience: true
+  # Must match booth-core's BOOTH_OIDC_GROUPS_CLAIM (ADR 0025).
+  groupsClaim: groups
+
+core:
+  # booth-core's in-cluster base URL, e.g. http://booth-core.booth-system.svc.cluster.local:8080.
+  # booth-api reads catalog datasets through core's gateway with the caller's own token (ADR 0007).
+  # Empty: generating an API fails with a clear error; key management still works.
+  url: ""
 
 podSecurityContext:
   runAsNonRoot: true

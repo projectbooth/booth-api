@@ -42,6 +42,21 @@ spec:
                 secretKeyRef:
                   name: booth-database-credentials
                   key: dsn
+            {{- with .Values.core.url }}
+            - name: BOOTH_CORE_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.oidc.issuerUrl }}
+            # The management API verifies tokens itself (ADR 0041).
+            - name: BOOTH_OIDC_ISSUER_URL
+              value: {{ . | quote }}
+            - name: BOOTH_OIDC_CLIENT_ID
+              value: {{ required "oidc.clientId is required when oidc.issuerUrl is set" $.Values.oidc.clientId | quote }}
+            - name: BOOTH_OIDC_REQUIRE_AUDIENCE
+              value: {{ $.Values.oidc.requireAudience | quote }}
+            - name: BOOTH_OIDC_GROUPS_CLAIM
+              value: {{ $.Values.oidc.groupsClaim | quote }}
+            {{- end }}
           # /livez never touches PostgreSQL (a restart can't fix an outage); /healthz does, and
           # is what core polls.
           livenessProbe:
