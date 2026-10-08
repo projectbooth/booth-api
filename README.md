@@ -10,6 +10,144 @@ datasets, revocable; no rate limiting yet, but a maximum page size and a GraphQL
 limit. Data comes from Postgres tables in `booth-database`, read through booth-core's credential
 sidecar (ADR 0095); Iceberg tables and files are out of v0 (`ARCHITECTURE.md` item 53).
 
+## Using a generated API
+
+This describes what is built today. Contracts: ADR 0100 (scope), ADR 0101 (public route), ADR 0102
+(postgres datasets), ADR 0103 (data access).
+
+### 1. Register the table in the catalog
+
+A generated API reads one table in your workspace's booth-database database. Register that table in
+**Catalog** as a dataset with `format: "postgres"` and `postgresTable: {schema, name}` (ADR 0102).
+If you give the dataset a column list, it must name exactly the table's columns. Leave it empty if
+you don't want to keep one; booth-api reads the real columns from the table either way.
+
+### 2. Generate the API (editor or owner)
+
+In **Manage → API** (`/apis`), pick the dataset under "Generate an API from a dataset". booth-api
+reads the table's columns and stores them as the API's schema; it keeps that schema until you press
+**Regenerate**. Each API card shows:
+
+- its **slug**, which is part of every URL below (from the dataset name, e.g. `orders`);
+- its columns, with "Show GraphQL schema" and "Show OpenAPI document";
+- its public URLs.
+
+Columns whose type has no faithful JSON/GraphQL form (`bytea`, intervals, etc.) are left out and
+listed under the schema.
+
+### 3. Create a key (editor or owner)
+
+Under **API keys**, give the key a name, tick the datasets it may read, and press **Create key**.
+
+- The key, `booth_ak_<id>_<secret>`, is shown **once**. Copy it then. booth-api keeps only a hash.
+- It reads only the datasets you ticked, in this workspace.
+- It reads data **as you**. It stops working if you lose access to the workspace, or if you don't
+  sign in to Booth for 7 days (booth-core's default). Within about 7 minutes of that, requests
+  answer 403. Create keys for long-running jobs as someone who signs in regularly.
+- **Revoke** takes effect on the key's next request (401). The list shows when each key was last
+  used.
+
+### 4. Call it
+
+Every request goes through booth-core's gateway at
+
+```
+<booth URL>/modules/api/public/v1/<slug>/...
+Authorization: Bearer booth_ak_<id>_<secret>
+```
+
+No Booth login is involved, only the key. In the examples, `BASE` is
+`https://booth.example/modules/api/public/v1/orders` and `KEY` is your key.
+
+**REST**
+
+```sh
+# A page of rows (default 50, at most 500 per page)
+curl -H "Authorization: Bearer $KEY" "$BASE/rows"
+
+# Filter, choose fields, order (a leading '-' is descending)
+curl -H "Authorization: Bearer $KEY" \
+  "$BASE/rows?filter[region]=emea&filter[amount][gte]=10&fields=id,amount&order=-placed&limit=100"
+
+# Next page: pass page.nextCursor back as `after`, with the same filters and order, until it is null
+curl -H "Authorization: Bearer $KEY" "$BASE/rows?filter[region]=emea&order=-placed&after=<nextCursor>"
+
+# One row by primary key (tables with a single-column primary key)
+curl -H "Authorization: Bearer $KEY" "$BASE/rows/42"
+
+# The OpenAPI 3.1 document for this API
+curl -H "Authorization: Bearer $KEY" "$BASE/openapi.json"
+```
+
+A list answers `{"data": [ ...rows... ], "page": {"hasNext": true, "nextCursor": "..."}}`, and a
+single row answers `{"data": {...}}`.
+
+Filters are written `filter[field][op]=value`, and `filter[field]=value` means `eq`. Filters are
+combined with AND.
+
+| Operator | For |
+|---|---|
+| `eq`, `neq`, `isNull` (`true`/`false`) | every filterable column |
+| `in` (repeat the parameter: `filter[f][in]=a&filter[f][in]=b`) | every filterable column |
+| `lt`, `lte`, `gt`, `gte` | numbers, text, dates and times |
+| `startsWith` (literal prefix; `%` and `_` are not wildcards) | text |
+
+`order` (and GraphQL's `orderBy`) takes columns declared `NOT NULL`, since paging compares cursor
+values and NULLs break that; the primary key is always added as a tiebreak. Array and JSON columns
+can be returned but not filtered. Any parameter not listed here is a 400, so
+a typo can't quietly return more than you asked for.
+
+**GraphQL**
+
+```sh
+curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" "$BASE/graphql" -d '{
+  "query": "query($r: String) { rows(where: {region: {eq: $r}}, orderBy: [{field: placed, direction: DESC}], first: 20) { nodes { id amount } pageInfo { hasNextPage endCursor } } }",
+  "variables": {"r": "emea"}
+}'
+```
+
+- `rows(where, orderBy, first, after)` returns `nodes` and `pageInfo`.
+- `row(<primary key>: ...)` fetches one row (tables with a single-column key).
+- `where` also takes `and`, `or` and `not`.
+- GET with `?query=` works too.
+- There are no mutations; the API is read-only.
+- The full schema is under "Show GraphQL schema" in the UI, or by introspection.
+
+**Values.** `bigint` and `numeric` come back as strings (`"9007199254740993"`, `"12.50"`), so no
+precision is lost. Dates and times are ISO 8601 strings. JSON columns are JSON. Filter values use
+the same formats: `2026-10-08T09:00:00Z`, not `yesterday`.
+
+**Limits** (correctness limits; there is no rate limiting yet, ADR 0100):
+
+- page size at most 500, and asking for more is an error, not a silent clamp;
+- `in` lists at most 100 values; at most 50 comparisons per filter;
+- GraphQL: nesting depth 8, cost 10,000 (`first` × selected fields, summed), 5 root fields,
+  `and`/`or`/`not` nested at most 4 deep, query at most 16 KiB, request body at most 64 KiB;
+- every query is read-only and cancelled after 5 seconds.
+
+**Status codes**
+
+| Code | Means |
+|---|---|
+| 200 | OK (GraphQL query errors also come back as 200, in `errors`) |
+| 400 | Something about the request: an unknown parameter, a bad value, over a limit |
+| 401 | No key, or the key is unknown, wrong or revoked |
+| 403 | The key isn't scoped to this API's dataset, or its creator no longer has access |
+| 404 | No API with that slug in the key's workspace, or no row with that key |
+| 405 | Anything but GET/HEAD (REST) or GET/POST (GraphQL) |
+| 413 | A GraphQL request body over 64 KiB |
+| 503 | The query took longer than 5 seconds, or reading workspace data isn't configured |
+
+REST errors are `{"error": {"message": "..."}}` and GraphQL errors `{"errors": [{"message": "..."}]}`.
+
+**Known limitation: primary keys containing `/`.** booth-core decodes and cleans every public path
+before forwarding it (its traversal fix), so `GET .../rows/a%2Fb` reaches booth-api as `/rows/a/b`
+and can't match a key containing `/`. Fetch such a row with a filter instead:
+`GET .../rows?filter[<key column>]=a%2Fb`.
+
+**Don't expose this to the internet yet.** The public route has no rate limiting (ADR 0100, ADR 0101),
+so keep Booth on a network you control until that is decided.
+
 ## Status
 
 Built (details and the choices made: `docs/decisions/0001-keys-and-api-definitions.md`):
@@ -30,7 +168,9 @@ Built (details and the choices made: `docs/decisions/0001-keys-and-api-definitio
 - The public, key-authenticated path (`internal/public`, `docs/decisions/0005`): core's gateway
   serves `/modules/api/public/v1/<slug>/...` with no platform login (ADR 0101, manifest
   `publicRoutes: [/v1/]`), and booth-api checks the API key, the API's workspace and the key's
-  dataset scope, returning its own 401/403/404. `X-Booth-*` headers are never read there.
+  dataset scope, returning its own 401/403/404. `X-Booth-*` headers are never read there. A REST
+  row whose primary key contains `/` is reachable only through `filter[...]` (see "Known
+  limitation" above).
 
 - Reading workspace data (`internal/sidecars`, `internal/workload`, `docs/decisions/0006`): a
   workload token per workspace and key creator (ADR 0103), one booth-core credential-sidecar
