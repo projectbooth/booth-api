@@ -3,6 +3,7 @@ import {
   ApiError,
   deleteApi,
   generateApi,
+  getOpenAPI,
   getSchema,
   issueKey,
   listApis,
@@ -228,15 +229,43 @@ function ApiCard({ api, def, canWrite, onChange }: { api: ApiContext; def: ApiDe
 }
 
 function SchemaToggle({ api, id, generatedAt }: { api: ApiContext; id: string; generatedAt: string }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState<"graphql" | "openapi" | null>(null);
+  const toggle = (which: "graphql" | "openapi") => setOpen(open === which ? null : which);
   return (
     <div className="mt-2">
-      <button type="button" className="text-xs font-medium text-indigo-700 hover:underline dark:text-indigo-400" aria-expanded={open} onClick={() => setOpen(!open)}>
-        {open ? "Hide GraphQL schema" : "Show GraphQL schema"}
-      </button>
-      {/* generatedAt in the key reloads the schema after a regenerate */}
-      {open && <SchemaView key={generatedAt} api={api} id={id} />}
+      <div className="flex gap-4">
+        <button
+          type="button"
+          className="text-xs font-medium text-indigo-700 hover:underline dark:text-indigo-400"
+          aria-expanded={open === "graphql"}
+          onClick={() => toggle("graphql")}
+        >
+          {open === "graphql" ? "Hide GraphQL schema" : "Show GraphQL schema"}
+        </button>
+        <button
+          type="button"
+          className="text-xs font-medium text-indigo-700 hover:underline dark:text-indigo-400"
+          aria-expanded={open === "openapi"}
+          onClick={() => toggle("openapi")}
+        >
+          {open === "openapi" ? "Hide OpenAPI document" : "Show OpenAPI document"}
+        </button>
+      </div>
+      {/* generatedAt in the key reloads after a regenerate */}
+      {open === "graphql" && <SchemaView key={generatedAt} api={api} id={id} />}
+      {open === "openapi" && <OpenAPIView key={generatedAt} api={api} id={id} />}
     </div>
+  );
+}
+
+function OpenAPIView({ api, id }: { api: ApiContext; id: string }) {
+  const { state } = useLoad(() => getOpenAPI(api, id), [api, id]);
+  if (state.status === "loading") return <Muted>Loading OpenAPI document…</Muted>;
+  if (state.status === "error") return <ErrorBanner message={state.error} />;
+  return (
+    <pre className="mt-2 max-h-96 overflow-auto rounded bg-slate-50 p-3 font-mono text-xs text-slate-800 dark:bg-slate-950 dark:text-slate-200">
+      {JSON.stringify(state.data, null, 2)}
+    </pre>
   );
 }
 

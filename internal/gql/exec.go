@@ -7,20 +7,20 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/vektah/gqlparser/v2"
 	"github.com/vektah/gqlparser/v2/ast"
 	"github.com/vektah/gqlparser/v2/gqlerror"
 	"github.com/vektah/gqlparser/v2/validator"
+
+	"github.com/projectbooth/booth-api/internal/table"
 )
 
-// Limits are correctness limits, not quotas (ADR 0100 item 4): they bound what one request can
-// make the database do. Defaults are docs/design-v0.md §3's.
+// Limits are the shared table limits plus GraphQL's own. Correctness limits, not quotas (ADR 0100
+// item 4). Defaults are docs/design-v0.md §3's.
 type Limits struct {
-	DefaultFirst int
-	MaxFirst     int
+	table.Limits
 	// MaxDepth bounds field nesting outside introspection; a legitimate data query is about four
 	// deep (rows > nodes > field, pageInfo). Introspection gets its own, larger bound: the standard
 	// introspection query nests ofType about eight levels below __schema.
@@ -30,33 +30,21 @@ type Limits struct {
 	MaxComplexity int
 	// MaxRootFields bounds aliased root fields (each `rows` is one SQL statement).
 	MaxRootFields int
-	// MaxFilterDepth bounds and/or/not nesting; MaxPredicates the comparisons in one filter;
-	// MaxInList an `in` list.
-	MaxFilterDepth   int
-	MaxPredicates    int
-	MaxInList        int
-	MaxQueryBytes    int
-	StatementTimeout time.Duration
+	MaxQueryBytes int
 }
 
 // DefaultLimits are the defaults the chart will expose once the endpoint is mounted.
 var DefaultLimits = Limits{
-	DefaultFirst: 50, MaxFirst: 500, MaxDepth: 8, MaxIntrospectionDepth: 15, MaxComplexity: 10000,
-	MaxRootFields: 5, MaxFilterDepth: 4, MaxPredicates: 50, MaxInList: 100, MaxQueryBytes: 16 << 10,
-	StatementTimeout: 5 * time.Second,
+	Limits: table.DefaultLimits, MaxDepth: 8, MaxIntrospectionDepth: 15, MaxComplexity: 10000,
+	MaxRootFields: 5, MaxQueryBytes: 16 << 10,
 }
 
 // ErrNoFields: none of the table's columns has a type this API can serve.
 var ErrNoFields = errors.New("none of the table's columns has a type the API can serve")
 
-// DB is what execution needs: a read-only transaction per request. *pgxpool.Pool satisfies it.
-type DB interface {
-	BeginTx(ctx context.Context, opts pgx.TxOptions) (pgx.Tx, error)
-}
-
 // Engine serves one generated API's GraphQL schema.
 type Engine struct {
-	Model  Model
+	Model  table.Model
 	Schema *ast.Schema
 	SDL    string
 	Limits Limits
@@ -67,11 +55,11 @@ type Engine struct {
 
 // New builds the engine for a definition. The SDL is generated, so a failure here is a bug in this
 // package, not bad input; it is still returned rather than panicking.
-func New(m Model, l Limits) (*Engine, error) {
+func New(m table.Model, l Limits) (*Engine, error) {
 	if len(m.Fields) == 0 {
 		return nil, ErrNoFields
 	}
-	sdl := m.SDL()
+	sdl := SDL(m)
 	s, err := gqlparser.LoadSchema(&ast.Source{Name: "booth-api:" + m.Def.Slug, Input: sdl})
 	if err != nil {
 		return nil, fmt.Errorf("generated schema for %q is invalid: %w", m.Def.Slug, err)
@@ -99,7 +87,7 @@ func fail(format string, args ...any) Response {
 
 // Execute runs one request. Nothing touches the database until the query has parsed, validated
 // and passed every limit.
-func (e *Engine) Execute(ctx context.Context, db DB, req Request) Response {
+func (e *Engine) Execute(ctx context.Context, db table.DB, req Request) Response {
 	if len(req.Query) > e.Limits.MaxQueryBytes {
 		return fail("query is larger than %d bytes", e.Limits.MaxQueryBytes)
 	}
@@ -132,19 +120,16 @@ func (e *Engine) Execute(ctx context.Context, db DB, req Request) Response {
 	}
 
 	var out ordered
-	err := e.withTx(ctx, db, func(tx pgx.Tx) error {
+	err := table.WithTx(ctx, db, e.Limits.StatementTimeout, func(tx pgx.Tx) error {
 		x.tx = tx
 		var err error
 		out, err = x.selectObject(ctx, op.SelectionSet, queryObj{})
 		return err
 	})
 	if err != nil {
-		var qe *queryError
-		if errors.As(err, &qe) {
-			return fail("%s", qe.msg)
-		}
-		if errors.Is(err, context.DeadlineExceeded) || isStatementTimeout(err) {
-			return fail("the query took longer than %s and was cancelled", e.Limits.StatementTimeout)
+		var te *table.Error
+		if errors.As(err, &te) {
+			return fail("%s", te.Msg)
 		}
 		if e.OnInternalError != nil {
 			e.OnInternalError(err)
@@ -157,27 +142,6 @@ func (e *Engine) Execute(ctx context.Context, db DB, req Request) Response {
 	}
 	return Response{Data: data}
 }
-
-// withTx runs fn in a read-only transaction with a statement timeout: the lease is read-only
-// already (ADR 0103), this makes it so even if one weren't.
-func (e *Engine) withTx(ctx context.Context, db DB, fn func(pgx.Tx) error) error {
-	tx, err := db.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(context.Background()) //nolint:errcheck // nothing to keep; read-only
-	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = %d", e.Limits.StatementTimeout.Milliseconds())); err != nil {
-		return err
-	}
-	return fn(tx)
-}
-
-// queryError is an error whose message is safe to return to the caller.
-type queryError struct{ msg string }
-
-func (q *queryError) Error() string { return q.msg }
-
-func userErr(format string, args ...any) error { return &queryError{fmt.Sprintf(format, args...)} }
 
 // ---- field collection -------------------------------------------------------------------------
 
@@ -282,7 +246,7 @@ func (x *executor) check(op *ast.OperationDefinition) error {
 			if err != nil {
 				return err
 			}
-			if err := x.checkFilter(x.args(c)["where"], 1, new(int)); err != nil {
+			if err := table.CheckFilter(x.args(c)["where"], x.e.Limits.Limits); err != nil {
 				return err
 			}
 			nodes, page := 0, 0
@@ -321,59 +285,17 @@ func (x *executor) depth(ss ast.SelectionSet, level int) int {
 	return deepest
 }
 
-// first returns the effective page size, refusing (not clamping) one over the limit so a client
-// knows it would otherwise have got fewer rows than it asked for.
+// first returns the effective page size, refusing (not clamping) one over the limit.
 func (x *executor) first(c collected) (int, error) {
 	first := x.e.Limits.DefaultFirst
 	if v, ok := x.args(c)["first"]; ok && v != nil {
 		n, ok := asInt(v)
 		if !ok {
-			return 0, fmt.Errorf("first must be an integer")
+			return 0, table.Errorf("first must be an integer")
 		}
 		first = n
 	}
-	if first < 0 || first > x.e.Limits.MaxFirst {
-		return 0, fmt.Errorf("first must be between 0 and %d", x.e.Limits.MaxFirst)
-	}
-	return first, nil
-}
-
-func (x *executor) checkFilter(v any, depth int, predicates *int) error {
-	m, ok := v.(map[string]any)
-	if !ok || m == nil {
-		return nil
-	}
-	l := x.e.Limits
-	if depth > l.MaxFilterDepth {
-		return fmt.Errorf("filter is nested more than %d deep", l.MaxFilterDepth)
-	}
-	for k, sub := range m {
-		switch k {
-		case "and", "or":
-			list, _ := sub.([]any)
-			for _, s := range list {
-				if err := x.checkFilter(s, depth+1, predicates); err != nil {
-					return err
-				}
-			}
-		case "not":
-			if err := x.checkFilter(sub, depth+1, predicates); err != nil {
-				return err
-			}
-		default:
-			ops, _ := sub.(map[string]any)
-			for opName, val := range ops {
-				*predicates++
-				if list, ok := val.([]any); ok && opName == "in" && len(list) > l.MaxInList {
-					return fmt.Errorf("an in list has %d values; the limit is %d", len(list), l.MaxInList)
-				}
-			}
-		}
-	}
-	if *predicates > l.MaxPredicates {
-		return fmt.Errorf("filter has more than %d comparisons", l.MaxPredicates)
-	}
-	return nil
+	return first, table.CheckFirst(first, x.e.Limits.Limits)
 }
 
 func asInt(v any) (int, bool) {

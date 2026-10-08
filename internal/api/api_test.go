@@ -147,6 +147,11 @@ func TestGenerateAndManageAPIs(t *testing.T) {
 	if sdl, _ := got["sdl"].(string); !strings.Contains(sdl, "amount: Decimal") || !strings.Contains(sdl, "row(id: BigInt!): Row") {
 		t.Errorf("sdl = %s", sdl)
 	}
+	rec, got = e.do(viewer, "acme", "GET", "/api/apis/"+id+"/openapi", nil)
+	e.want(rec, 200, "openapi")
+	if got["openapi"] != "3.1.0" || got["paths"].(map[string]any)["/rows/{key}"] == nil {
+		t.Errorf("openapi = %v", got)
+	}
 
 	rec, got = e.do(viewer, "acme", "GET", "/api/apis", nil)
 	e.want(rec, 200, "viewer listing")

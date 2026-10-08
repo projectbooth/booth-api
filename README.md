@@ -22,7 +22,12 @@ Built (details and the choices made: `docs/decisions/0001-keys-and-api-definitio
 - The GraphQL engine (`internal/gql`; library choice `docs/decisions/0002`, schema and paging
   `docs/decisions/0003`): schema generated from a definition's snapshot, query validation, every
   ADR 0100 limit checked before SQL, one read-only parameterized statement per root field, keyset
-  pagination, introspection. Tested against real Postgres; not mounted on a route yet.
+  pagination, introspection.
+- The REST endpoint (`internal/rest`, `docs/decisions/0004`): `GET /rows` with filters, ordering,
+  field selection and cursors, `GET /rows/{key}`, and a generated OpenAPI 3.1 document linted in CI.
+  It shares the query layer (`internal/table`) with GraphQL, so both protocols compile the same
+  filter to the same SQL and their cursors are interchangeable.
+- Both endpoints are tested against real Postgres and are **not mounted on any route yet** (below).
 - `@projectbooth/api-ui`, the native view for all of the above (ADR 0030/0031/0033), including each
   API's GraphQL schema.
 - `charts/booth-api` with the `BoothModule` registration (ADR 0019): `id: api`, native UI under
@@ -37,7 +42,6 @@ Not built yet, and why:
   end against a fixture table.
 - **The generated endpoints.** They are served on core's public routes (ADR 0101), which core hasn't
   built; key verification exists but isn't mounted.
-- **REST generation**: the next step.
 - booth-catalog hasn't built `format: "postgres"` (ADR 0102) yet; booth-api reads the table block
   from a provisional field name (`internal/catalog`).
 
@@ -63,7 +67,9 @@ Not built yet, and why:
 | `internal/api` | Management API handlers |
 | `internal/apis` | Dataset-to-API definition flow |
 | `internal/apidef` | The definition snapshot, reconciliation, slugs |
+| `internal/table` | Query layer shared by both protocols: model, filters, paging, limits |
 | `internal/gql` | GraphQL schema generation, limits, execution, introspection |
+| `internal/rest` | REST handler and OpenAPI document |
 | `internal/catalog` | booth-catalog client, through core's gateway as the caller |
 | `internal/source` | Table introspection; per-workspace pools (not wired yet) |
 | `internal/keys` | Key format, hashing, issue/revoke/verify |
@@ -80,7 +86,7 @@ Not built yet, and why:
 
 | Layer | Where | When |
 |---|---|---|
-| Unit + contract | `.github/workflows/ci.yml`: `go` (gofmt, tidy, vet, `go test -race` against a real PostgreSQL from `hack/docker-compose.yml`, contract tests rendering the chart with helm), `web` (typecheck, lint, vitest, build), `helm-lint`, `image` (Docker build, not pushed) | Every push and PR; required by branch protection on `main` |
+| Unit + contract | `.github/workflows/ci.yml`: `go` (gofmt, tidy, vet, `go test -race` against a real PostgreSQL from `hack/docker-compose.yml`, contract tests rendering the chart with helm, Redocly lint of the generated OpenAPI document), `web` (typecheck, lint, vitest, build), `helm-lint`, `image` (Docker build, not pushed) | Every push and PR; required by branch protection on `main` |
 | Real cluster | `.github/workflows/integration.yml` runs `hack/kind-integration.sh` | Merge to `main`, nightly, manual |
 | Cross-repo e2e | `booth-e2e` | Owned there |
 

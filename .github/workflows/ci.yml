@@ -38,9 +38,19 @@ jobs:
         env:
           BOOTH_TEST_REQUIRE_HELM: "1"
           BOOTH_TEST_REQUIRE_POSTGRES: "1"
+          BOOTH_TEST_OPENAPI_OUT: ${{ runner.temp }}/openapi.json
         run: |
           eval "$(sh hack/test-env.sh)"
           go test -race -count=1 ./...
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22" # @redocly/cli 2.x needs >=20.19 or >=22.12
+      # The REST endpoint's generated OpenAPI 3.1 document (written by internal/rest's TestOpenAPI)
+      # must pass a real OpenAPI linter, not just look right to our own assertions.
+      - name: Lint the generated OpenAPI document
+        run: |
+          test -s "${{ runner.temp }}/openapi.json"
+          npx -y @redocly/cli@2.53.3 lint "${{ runner.temp }}/openapi.json" --config hack/redocly.yaml
       - name: PostgreSQL logs on failure
         if: failure()
         run: docker compose -f hack/docker-compose.yml logs --tail=100

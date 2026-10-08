@@ -63,6 +63,8 @@ export const generateApi = (ctx: ApiContext, datasetId: string) =>
 
 export const getSchema = (ctx: ApiContext, id: string) => request<GraphQLSchema>(ctx, `${BASE}/apis/${encodeURIComponent(id)}/schema`);
 
+export const getOpenAPI = (ctx: ApiContext, id: string) => request<Record<string, unknown>>(ctx, `${BASE}/apis/${encodeURIComponent(id)}/openapi`);
+
 export const regenerateApi = (ctx: ApiContext, id: string) =>
   request<ApiDefinition>(ctx, `${BASE}/apis/${encodeURIComponent(id)}/regenerate`, { method: "POST" });
 

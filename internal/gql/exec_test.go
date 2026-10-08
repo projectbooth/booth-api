@@ -15,11 +15,12 @@ import (
 	"github.com/projectbooth/booth-api/internal/apidef"
 	"github.com/projectbooth/booth-api/internal/db/dbtest"
 	"github.com/projectbooth/booth-api/internal/source"
+	"github.com/projectbooth/booth-api/internal/table"
 )
 
 // fixture creates a table in a fresh schema, snapshots it the way generation does
 // (source.Introspect), and returns an engine for it.
-func fixture(t *testing.T, ddl, table string, limits Limits) (*Engine, *pgxpool.Pool) {
+func fixture(t *testing.T, ddl, name string, limits Limits) (*Engine, *pgxpool.Pool) {
 	t.Helper()
 	pool := dbtest.Pool(t)
 	ctx := context.Background()
@@ -30,12 +31,12 @@ func fixture(t *testing.T, ddl, table string, limits Limits) (*Engine, *pgxpool.
 	if err := pool.QueryRow(ctx, `SELECT current_schema()`).Scan(&schema); err != nil {
 		t.Fatal(err)
 	}
-	ref := apidef.TableRef{Schema: schema, Name: table}
+	ref := apidef.TableRef{Schema: schema, Name: name}
 	tbl, err := source.Introspect(ctx, pool, ref)
 	if err != nil {
 		t.Fatal(err)
 	}
-	e, err := New(NewModel(apidef.Definition{Slug: table, DatasetName: table, Table: ref, Columns: tbl.Columns, PrimaryKey: tbl.PrimaryKey}), limits)
+	e, err := New(table.NewModel(apidef.Definition{Slug: name, DatasetName: name, Table: ref, Columns: tbl.Columns, PrimaryKey: tbl.PrimaryKey}), limits)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +65,7 @@ INSERT INTO orders VALUES
 	(6, 'apac', 0.01,  '2026-10-06T10:00:00Z', false, NULL, NULL, NULL, 6),
 	(7, 'axb',  1.00,  '2026-10-07T10:00:00Z', true,  NULL, NULL, NULL, 7);`
 
-func run(t *testing.T, e *Engine, db DB, query string, vars map[string]any) (map[string]any, []string) {
+func run(t *testing.T, e *Engine, db table.DB, query string, vars map[string]any) (map[string]any, []string) {
 	t.Helper()
 	r := e.Execute(context.Background(), db, Request{Query: query, Variables: vars})
 	var errs []string
@@ -82,7 +83,7 @@ func run(t *testing.T, e *Engine, db DB, query string, vars map[string]any) (map
 	return data, errs
 }
 
-func mustRun(t *testing.T, e *Engine, db DB, query string, vars map[string]any) map[string]any {
+func mustRun(t *testing.T, e *Engine, db table.DB, query string, vars map[string]any) map[string]any {
 	t.Helper()
 	data, errs := run(t, e, db, query, vars)
 	if errs != nil {
@@ -415,7 +416,7 @@ func TestStatementTimeout(t *testing.T) {
 func TestReadOnly(t *testing.T) {
 	e, pool := fixture(t, ordersDDL, "orders", DefaultLimits)
 	// Even with a writable role, the transaction is read-only.
-	err := e.withTx(context.Background(), pool, func(tx pgx.Tx) error {
+	err := table.WithTx(context.Background(), pool, e.Limits.StatementTimeout, func(tx pgx.Tx) error {
 		_, err := tx.Exec(context.Background(), `DELETE FROM orders`)
 		return err
 	})
