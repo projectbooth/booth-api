@@ -23,3 +23,38 @@ jobs:
           install_only: true
       - uses: azure/setup-helm@v4
       - run: bash hack/kind-integration.sh
+
+  realstack:
+    # The real-stack test (hack/realstack-integration.sh): Keycloak plus REAL booth-core,
+    # booth-database and booth-catalog, each built from source at a pinned commit and installed from
+    # its own chart, with this booth-api; then an in-cluster check of the whole path: datasets
+    # registered in the catalog, APIs generated through the gateway, data read through core's
+    # broker, booth-database's provider and booth-core's real credential sidecar, and API keys used
+    # on core's real public route (key, scope, workspace isolation, revocation, creator losing
+    # access). Pinned, not moving branches (contracts/testing-strategy.md): bump deliberately.
+    #   CORE_REF     cb8e03a: publicRoutes (ADR 0101), core PR #2's merge
+    #   DATABASE_REF bdab4b8: booth-database main, 2026-10-08
+    #   CATALOG_REF  c46f80f: format "postgres" datasets (ADR 0102)
+    runs-on: ubuntu-24.04
+    env:
+      CORE_REF: cb8e03a6acf7b530809f67394fbc3f606cae79bd
+      DATABASE_REF: bdab4b82dc662ab4bb4afa9d3084b0b765943eae
+      CATALOG_REF: c46f80f32dcc04206f4a4700de9fad47aaf75757
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with: {repository: projectbooth/booth-core, ref: "${{ env.CORE_REF }}", path: siblings/booth-core}
+      - uses: actions/checkout@v4
+        with: {repository: projectbooth/booth-database, ref: "${{ env.DATABASE_REF }}", path: siblings/booth-database}
+      - uses: actions/checkout@v4
+        with: {repository: projectbooth/booth-catalog, ref: "${{ env.CATALOG_REF }}", path: siblings/booth-catalog}
+      - uses: helm/kind-action@v1
+        with:
+          install_only: true
+      - uses: azure/setup-helm@v4
+      - name: Real-stack integration
+        env:
+          CORE_DIR: siblings/booth-core
+          DATABASE_DIR: siblings/booth-database
+          CATALOG_DIR: siblings/booth-catalog
+        run: bash hack/realstack-integration.sh
