@@ -1,7 +1,8 @@
 # 0005: The key-authenticated public path (ADR 0101)
 
-Date: 2026-10-08. Built against booth-core's publicRoutes change (core PR #2, `add-public-routes`,
-head `416e0ab`, its `docs/decisions/0016`), read in full before building.
+Date: 2026-10-08. Built against booth-core's publicRoutes change (core PR #2, its
+`docs/decisions/0016`, read in full before building), merged to core's main as `cb8e03a`, whose
+tree is identical to the `416e0ab` head this was built and tested against.
 
 ## Shape
 
@@ -58,6 +59,5 @@ test.
 
 ## Depends on
 
-booth-core PR #2 being merged. The kind test's vendored CRD
-(`test/integration/fixtures/boothmodule-crd.yaml`) is copied from that PR's head; re-vendor it from
-core's `main` once merged.
+booth-core `cb8e03a` or later (publicRoutes). The kind test's vendored CRD
+(`test/integration/fixtures/boothmodule-crd.yaml`) is booth-core's at that commit.
