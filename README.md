@@ -47,6 +47,30 @@ Under **API keys**, give the key a name, tick the datasets it may read, and pres
 - **Revoke** takes effect on the key's next request (401). The list shows when each key was last
   used.
 
+### Without the UI
+
+Steps 1 to 3 are ordinary HTTP calls through booth-core's gateway, made with a person's Booth
+token (`Authorization: Bearer <token>`) and the workspace (`X-Workspace: <slug>`). They're what the
+Catalog and API pages send, and they're useful for scripting a setup:
+
+```sh
+H=(-H "Authorization: Bearer $TOKEN" -H "X-Workspace: acme" -H "Content-Type: application/json")
+
+# 1. Register the table (returns the dataset, with its "id")
+curl "${H[@]}" "<booth URL>/modules/catalog/api/datasets" -d '{"name": "Orders", "description": "",
+  "format": "postgres", "postgresTable": {"schema": "public", "name": "orders"}, "schema": [], "tags": []}'
+
+# 2. Generate its API (returns the API, with its "slug")
+curl "${H[@]}" "<booth URL>/modules/api/api/apis" -d '{"datasetId": "<dataset id>"}'
+
+# 3. Create a key (the response's "secret" is the key; it is not shown again)
+curl "${H[@]}" "<booth URL>/modules/api/api/keys" -d '{"name": "nightly export", "datasetIds": ["<dataset id>"]}'
+
+# List keys, and revoke one
+curl "${H[@]}" "<booth URL>/modules/api/api/keys"
+curl "${H[@]}" -X POST "<booth URL>/modules/api/api/keys/<key id>/revoke"
+```
+
 ### 4. Call it
 
 Every request goes through booth-core's gateway at
@@ -61,16 +85,19 @@ No Booth login is involved, only the key. In the examples, `BASE` is
 
 **REST**
 
+With curl, use `-g` (`--globoff`) on any URL containing `filter[...]`: otherwise curl reads the
+brackets as one of its own URL patterns and fails with `curl: (3) bad range`.
+
 ```sh
 # A page of rows (default 50, at most 500 per page)
 curl -H "Authorization: Bearer $KEY" "$BASE/rows"
 
 # Filter, choose fields, order (a leading '-' is descending)
-curl -H "Authorization: Bearer $KEY" \
+curl -g -H "Authorization: Bearer $KEY" \
   "$BASE/rows?filter[region]=emea&filter[amount][gte]=10&fields=id,amount&order=-placed&limit=100"
 
 # Next page: pass page.nextCursor back as `after`, with the same filters and order, until it is null
-curl -H "Authorization: Bearer $KEY" "$BASE/rows?filter[region]=emea&order=-placed&after=<nextCursor>"
+curl -g -H "Authorization: Bearer $KEY" "$BASE/rows?filter[region]=emea&order=-placed&after=<nextCursor>"
 
 # One row by primary key (tables with a single-column primary key)
 curl -H "Authorization: Bearer $KEY" "$BASE/rows/42"
