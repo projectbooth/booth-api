@@ -54,7 +54,7 @@ type TokenVerifier interface {
 	Verify(ctx context.Context, rawToken string) (*Claims, error)
 }
 
-// OIDCConfig is the identity-provider configuration â€” the same shape as booth-core's, so every
+// OIDCConfig is the identity-provider configuration — the same shape as booth-core's, so every
 // module verifies against the same provider.
 type OIDCConfig struct {
 	IssuerURL       string
@@ -109,7 +109,7 @@ func NewVerifier(ctx context.Context, cfg OIDCConfig) (*Verifier, error) {
 }
 
 // Verify checks signature, issuer, expiry and (when configured) audience, then reads the groups
-// claim. A token from any other issuer â€” including booth-core's workload issuer â€” fails here.
+// claim. A token from any other issuer — including booth-core's workload issuer — fails here.
 func (v *Verifier) Verify(ctx context.Context, rawToken string) (*Claims, error) {
 	idToken, err := v.verifier.Verify(ctx, rawToken)
 	if err != nil {
@@ -170,7 +170,7 @@ func RoleInWorkspace(groups []string, workspace string) Role {
 
 // EffectiveRole is never stronger than the token's grant, nor than the forwarded role (a gateway
 // may narrow, never widen). An absent forwarded role means "use the token's"; an unrecognized one
-// yields "" â€” no access.
+// yields "" — no access.
 func EffectiveRole(forwarded, granted Role) Role {
 	if forwarded == "" {
 		return granted
@@ -208,7 +208,7 @@ func FromContext(ctx context.Context) (Identity, bool) {
 	return id, ok
 }
 
-// WithIdentity attaches an identity the way Middleware does â€” for handler tests.
+// WithIdentity attaches an identity the way Middleware does — for handler tests.
 func WithIdentity(ctx context.Context, id Identity) context.Context {
 	return context.WithValue(ctx, contextKey{}, id)
 }
