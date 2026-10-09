@@ -74,7 +74,7 @@ func run() error {
 				verifier.Store(v)
 			}
 			return err
-		}, func() { log.Printf("management API: verifying tokens against %s", cfg.OIDC.IssuerURL) })
+		}, func() {}) // auth.NewVerifier logs the issuer and where keys come from once, on success
 	}
 	if cfg.CoreURL == "" {
 		log.Print("WARNING: BOOTH_CORE_URL is not set; generating an API will fail, since the catalog is reached through core's gateway.")

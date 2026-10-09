@@ -24,7 +24,18 @@ it's running is in the README ("Using a generated API").
 | `core.url` | booth-core's in-cluster URL, e.g. `http://booth-core.booth-system.svc:8080` | Generating an API fails, and every data request on the public route answers 503 ("reading workspace databases is not available yet"). Keys and the schema documents still work. |
 | `oidc.issuerUrl`, `oidc.clientId` | The same identity provider and client booth-core uses (e.g. Keycloak's realm URL and `booth-design`) | The management API (the API page in Booth) answers 503. |
 | `oidc.groupsClaim` | Only if booth-core's isn't `groups` | Roles aren't recognised; everyone gets 403 on the management API. |
+| `oidc.jwksUrl` | Optional (ADR 0108): where to fetch the identity provider's signing keys instead of using discovery, e.g. `http://keycloak.keycloak.svc:8080/realms/booth/protocol/openid-connect/certs` | Discovery from `oidc.issuerUrl`, as before. |
 | `dataAccess.idle` | How long an unused sidecar keeps running (default `10m`) | Defaults apply. |
+
+**`oidc.jwksUrl` (ADR 0108).** When set, booth-api fetches the provider's signing keys directly from
+this URL and never contacts the issuer's discovery document. Tokens are still accepted only if their
+`iss` equals `oidc.issuerUrl` exactly. Setting it without `oidc.issuerUrl` is a startup error. At
+startup booth-api logs `oidc: verifying tokens with issuer=… keys-from=…` once. The bundled install
+points it at Keycloak's in-cluster Service over plain http, so pods never dial the Ingress or need to
+trust its certificate. **The trust assumption:** that key fetch is in-cluster, unauthenticated and
+unencrypted, so it relies on NetworkPolicy and on trusting the cluster network. Anyone who could
+answer that URL could issue tokens booth-api accepts. Leave it empty when the identity provider is
+external.
 
 Setting `core.url` is what turns data access on. With it, the chart declares
 `workloadIdentity.mint`, reads `booth-workload-minting-credentials`, and mounts an in-memory

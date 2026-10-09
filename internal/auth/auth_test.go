@@ -1,11 +1,15 @@
 package auth_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -134,5 +138,87 @@ func TestCanWrite(t *testing.T) {
 		if got := (auth.Identity{Role: role}).CanWrite(); got != want {
 			t.Errorf("CanWrite(%q) = %v, want %v", role, got, want)
 		}
+	}
+}
+
+// ADR 0108 key-fetch override: keys from a plain-http JWKS URL, the issuer an https URL nothing can
+// reach. A token from that issuer verifies, discovery is never contacted, and `iss` is still
+// compared exactly (a token signed with the same key but naming another issuer is refused).
+func TestVerifierJWKSOverride(t *testing.T) {
+	idp := authtest.New(t)
+	const issuer = "https://booth.home.arpa.invalid/realms/booth"
+	ctx := context.Background()
+	v, err := auth.NewVerifier(ctx, auth.OIDCConfig{IssuerURL: issuer, ClientID: "booth-api", JWKSURL: idp.URL + "/jwks"})
+	if err != nil {
+		t.Fatalf("NewVerifier with an unreachable issuer and a JWKS URL: %v", err)
+	}
+
+	c, err := v.Verify(ctx, idp.Mint(t, authtest.Token{Issuer: issuer, Subject: "alice", Groups: []string{"/workspaces/acme/owner"}}))
+	if err != nil || c.Subject != "alice" || len(c.Groups) != 1 {
+		t.Fatalf("valid token: %+v, %v", c, err)
+	}
+	for name, iss := range map[string]string{
+		"another https issuer":             "https://wrong.invalid/realms/booth",
+		"the JWKS server's own address":    idp.URL,
+		"the issuer with a trailing slash": issuer + "/",
+	} {
+		if _, err := v.Verify(ctx, idp.Mint(t, authtest.Token{Issuer: iss, Subject: "alice"})); err == nil {
+			t.Errorf("%s: a token naming %q verified; iss must match %q exactly", name, iss, issuer)
+		}
+	}
+	if n := idp.DiscoveryHits.Load(); n != 0 {
+		t.Errorf("discovery was requested %d times with the override set", n)
+	}
+
+	// The audience policy is unchanged by the override.
+	strict, err := auth.NewVerifier(ctx, auth.OIDCConfig{IssuerURL: issuer, ClientID: "booth-api", JWKSURL: idp.URL + "/jwks", RequireAudience: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := strict.Verify(ctx, idp.Mint(t, authtest.Token{Issuer: issuer, Subject: "alice", Audience: "someone-else"})); err == nil {
+		t.Error("audience not enforced with the override set")
+	}
+	if _, err := strict.Verify(ctx, idp.Mint(t, authtest.Token{Issuer: issuer, Subject: "alice", Audience: "booth-api"})); err != nil {
+		t.Errorf("matching audience: %v", err)
+	}
+}
+
+// Without the override, discovery is used exactly as before.
+func TestVerifierWithoutOverrideUsesDiscovery(t *testing.T) {
+	idp := authtest.New(t)
+	if _, err := auth.NewVerifier(context.Background(), auth.OIDCConfig{IssuerURL: idp.URL, ClientID: "booth-api"}); err != nil {
+		t.Fatal(err)
+	}
+	if idp.DiscoveryHits.Load() == 0 {
+		t.Error("discovery wasn't used with no JWKS URL set")
+	}
+}
+
+func TestNewVerifierRejectsJWKSURLWithoutIssuer(t *testing.T) {
+	idp := authtest.New(t)
+	if _, err := auth.NewVerifier(context.Background(), auth.OIDCConfig{ClientID: "booth-api", JWKSURL: idp.URL + "/jwks"}); err == nil {
+		t.Error("a JWKS URL without an issuer was accepted")
+	}
+}
+
+// The issuer and the key source are logged once, at construction; tokens never are.
+func TestNewVerifierLogsIssuerAndKeySourceOnce(t *testing.T) {
+	idp := authtest.New(t)
+	const issuer = "https://booth.home.arpa.invalid/realms/booth"
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	v, err := auth.NewVerifier(context.Background(), auth.OIDCConfig{IssuerURL: issuer, ClientID: "booth-api", JWKSURL: idp.URL + "/jwks"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := idp.Mint(t, authtest.Token{Issuer: issuer, Subject: "alice"})
+	_, _ = v.Verify(context.Background(), tok)
+	out := buf.String()
+	if strings.Count(out, "oidc: verifying tokens") != 1 || !strings.Contains(out, "issuer="+issuer) || !strings.Contains(out, "keys-from="+idp.URL+"/jwks") {
+		t.Errorf("log = %q", out)
+	}
+	if strings.Contains(out, tok) {
+		t.Error("a token was logged")
 	}
 }

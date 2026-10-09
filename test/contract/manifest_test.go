@@ -223,6 +223,25 @@ func TestManifest_PublicRoutes(t *testing.T) {
 	}
 }
 
+// ADR 0108: oidc.jwksUrl reaches the pod as BOOTH_OIDC_JWKS_URL only when set; the default render is
+// unchanged. It renders even without oidc.issuerUrl, so that mistake fails at startup (config.Load)
+// rather than being dropped silently.
+func TestChart_JWKSURL(t *testing.T) {
+	requireHelm(t)
+	if strings.Contains(string(helmTemplate(t)), "BOOTH_OIDC_JWKS_URL") {
+		t.Error("BOOTH_OIDC_JWKS_URL rendered by default")
+	}
+	const u = "http://keycloak.keycloak.svc:8080/realms/booth/protocol/openid-connect/certs"
+	for _, extra := range [][]string{
+		{"--set", "oidc.issuerUrl=https://booth.example/realms/booth", "--set", "oidc.clientId=booth-design", "--set", "oidc.jwksUrl=" + u},
+		{"--set", "oidc.jwksUrl=" + u},
+	} {
+		if s := string(helmTemplate(t, extra...)); !strings.Contains(s, "- name: BOOTH_OIDC_JWKS_URL\n              value: \""+u+"\"") {
+			t.Errorf("%v: BOOTH_OIDC_JWKS_URL not rendered", extra)
+		}
+	}
+}
+
 // ADR 0103: workload minting is declared exactly when the data path can work (core.url set), and
 // the deployment then reads the minting Secret core delivers and gives the sidecars an in-memory
 // directory (the root filesystem is read-only).
