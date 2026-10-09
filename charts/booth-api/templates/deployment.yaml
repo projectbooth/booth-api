@@ -73,6 +73,12 @@ spec:
             - name: BOOTH_OIDC_GROUPS_CLAIM
               value: {{ $.Values.oidc.groupsClaim | quote }}
             {{- end }}
+            {{- with .Values.oidc.jwksUrl }}
+            # ADR 0108 key-fetch override. Rendered even without issuerUrl, so that mistake fails
+            # at startup instead of being silently ignored.
+            - name: BOOTH_OIDC_JWKS_URL
+              value: {{ . | quote }}
+            {{- end }}
           # /livez never touches PostgreSQL (a restart can't fix an outage); /healthz does, and
           # is what core polls.
           livenessProbe:

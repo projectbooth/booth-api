@@ -45,6 +45,24 @@ func TestLoad_DataAccess(t *testing.T) {
 	}
 }
 
+// ADR 0108: a key URL needs an issuer to validate `iss` against; unset, nothing changes.
+func TestLoad_JWKSURL(t *testing.T) {
+	t.Setenv("BOOTH_API_DATABASE_DSN", "postgres://u:p@h/db")
+	if cfg, err := Load(); err != nil || cfg.OIDC.JWKSURL != "" {
+		t.Fatalf("unset: %+v %v", cfg.OIDC, err)
+	}
+	t.Setenv("BOOTH_OIDC_JWKS_URL", "http://keycloak.keycloak.svc:8080/realms/booth/protocol/openid-connect/certs")
+	if _, err := Load(); err == nil {
+		t.Error("BOOTH_OIDC_JWKS_URL without BOOTH_OIDC_ISSUER_URL was accepted")
+	}
+	t.Setenv("BOOTH_OIDC_ISSUER_URL", "https://booth.example/realms/booth")
+	t.Setenv("BOOTH_OIDC_CLIENT_ID", "booth-design")
+	cfg, err := Load()
+	if err != nil || cfg.OIDC.JWKSURL != "http://keycloak.keycloak.svc:8080/realms/booth/protocol/openid-connect/certs" || cfg.OIDC.IssuerURL != "https://booth.example/realms/booth" {
+		t.Errorf("set: %+v %v", cfg.OIDC, err)
+	}
+}
+
 func TestLoad_OIDC(t *testing.T) {
 	t.Setenv("BOOTH_API_DATABASE_DSN", "postgres://u:p@h/db")
 	t.Setenv("BOOTH_OIDC_ISSUER_URL", "https://idp.example")

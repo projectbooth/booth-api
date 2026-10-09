@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +21,9 @@ import (
 type IdP struct {
 	URL string
 	Key *rsa.PrivateKey
+	// DiscoveryHits counts requests for the discovery document, so a test can prove the ADR 0108
+	// key-fetch override never asks for it.
+	DiscoveryHits atomic.Int64
 }
 
 // New starts an IdP for the duration of the test.
@@ -32,6 +36,7 @@ func New(t testing.TB) *IdP {
 	idp := &IdP{Key: key}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		idp.DiscoveryHits.Add(1)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"issuer": idp.URL, "jwks_uri": idp.URL + "/jwks",
 			"authorization_endpoint": idp.URL + "/auth", "token_endpoint": idp.URL + "/token",

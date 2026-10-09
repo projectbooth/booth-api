@@ -26,6 +26,10 @@ oidc:
   requireAudience: true
   # Must match booth-core's BOOTH_OIDC_GROUPS_CLAIM (ADR 0025).
   groupsClaim: groups
+  # ADR 0108: fetch signing keys from this URL instead of the issuer's discovery document; `iss`
+  # is still checked exactly against issuerUrl. The bundled install points it at Keycloak's
+  # in-cluster Service over plain http. Empty (default): discovery. Requires issuerUrl.
+  jwksUrl: ""
 
 core:
   # booth-core's in-cluster base URL, e.g. http://booth-core.booth-system.svc.cluster.local:8080.

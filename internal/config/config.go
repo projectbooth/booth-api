@@ -58,6 +58,7 @@ func Load() (Config, error) {
 			IssuerURL:   os.Getenv("BOOTH_OIDC_ISSUER_URL"),
 			ClientID:    os.Getenv("BOOTH_OIDC_CLIENT_ID"),
 			GroupsClaim: getEnv("BOOTH_OIDC_GROUPS_CLAIM", auth.DefaultGroupsClaim),
+			JWKSURL:     os.Getenv("BOOTH_OIDC_JWKS_URL"),
 		},
 	}
 	if cfg.DatabaseDSN == "" {
@@ -84,6 +85,10 @@ func Load() (Config, error) {
 	}
 	if cfg.DataAccess() && cfg.CoreURL == "" {
 		return Config{}, fmt.Errorf("BOOTH_CORE_URL is required for data access: the credential sidecar calls core's broker")
+	}
+	// ADR 0108: a key URL without an issuer has no `iss` to validate against.
+	if cfg.OIDC.JWKSURL != "" && cfg.OIDC.IssuerURL == "" {
+		return Config{}, fmt.Errorf("BOOTH_OIDC_JWKS_URL is set but BOOTH_OIDC_ISSUER_URL is empty: the issuer is still required to validate `iss`")
 	}
 	if cfg.OIDC.IssuerURL != "" && cfg.OIDC.ClientID == "" {
 		return Config{}, fmt.Errorf("BOOTH_OIDC_CLIENT_ID is required when BOOTH_OIDC_ISSUER_URL is set")
