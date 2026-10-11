@@ -1,0 +1,87 @@
+name: Release
+
+# ADR 0111: pushing a `vX.Y.Z` tag publishes booth-api for a real install.
+#   - image  ghcr.io/projectbooth/booth-api:X.Y.Z (and :latest, which no install uses);
+#   - chart  booth-api-X.Y.Z.tgz, packaged with --version and --app-version X.Y.Z (so the chart's
+#            image tag, which defaults to appVersion, is the image above), attached to the GitHub
+#            release and pushed to oci://ghcr.io/projectbooth/charts/booth-api.
+# One image: the credential sidecar booth-api runs is copied into it from booth-core's digest-pinned
+# image (Dockerfile), not published separately. Modelled on booth-storage's and booth-core's
+# release.yml. The UI package is published separately, on `api-ui-v*` tags (publish.yml).
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # The build pulls golang from Docker Hub. An authenticated pull gets a higher rate limit,
+      # as in booth-core's release.yml; the org secret is used when it reaches this repo and the
+      # step is skipped (anonymous pull, as CI's image job does) when it doesn't.
+      - uses: docker/login-action@v3
+        if: env.DOCKERHUB_USERNAME != ''
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/projectbooth/booth-api:${{ steps.version.outputs.version }}
+            ghcr.io/projectbooth/booth-api:latest
+
+  chart:
+    needs: image
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+
+      - name: Package chart at the release version
+        working-directory: charts/booth-api
+        run: |
+          helm package . \
+            --version "${{ needs.image.outputs.version }}" \
+            --app-version "${{ needs.image.outputs.version }}" \
+            --destination ../../dist
+
+      - name: The packaged chart renders with default values
+        run: helm template booth-api "dist/booth-api-${{ needs.image.outputs.version }}.tgz" >/dev/null
+
+      - name: Attach chart to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tgz
+          generate_release_notes: true
+
+      - name: helm registry login (ghcr.io)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username ${{ github.actor }} --password-stdin
+
+      - name: Push chart as an OCI artifact (ADR 0111)
+        run: helm push "dist/booth-api-${{ needs.image.outputs.version }}.tgz" oci://ghcr.io/projectbooth/charts
