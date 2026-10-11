@@ -80,6 +80,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
       - run: helm lint charts/booth-api
+      # The release's chart step (release.yml), rehearsed on every push so it can't rot unnoticed:
+      # package with --version/--app-version, render the .tgz with default values, and check the
+      # image it would deploy is the one the release pushes.
+      - name: Release packaging rehearsal
+        run: |
+          helm package charts/booth-api --version 0.0.0-ci --app-version 0.0.0-ci --destination dist
+          helm template booth-api dist/booth-api-0.0.0-ci.tgz > dist/render.yaml
+          grep -q 'image: "ghcr.io/projectbooth/booth-api:0.0.0-ci"' dist/render.yaml \
+            || { echo "the packaged chart doesn't deploy ghcr.io/projectbooth/booth-api at its appVersion"; exit 1; }
 
   image:
     # Catches a broken Dockerfile on the PR that breaks it. Not pushed.
