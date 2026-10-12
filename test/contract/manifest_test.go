@@ -306,6 +306,7 @@ const identityKeysAnnotation = "booth.projectbooth.io/identity-keys"
 var sharedIdentityKeys = map[string]bool{
 	"issuerUrl": true, "clientId": true, "jwksUrl": true,
 	"workloadIssuerUrl": true, "groupsClaim": true, "iframeIssuerUrl": true,
+	"coreUrl": true, // amendment 1
 }
 
 // checkIdentityKeys returns every problem with an identity-keys annotation value against a
@@ -347,8 +348,76 @@ func valueAtPath(root map[string]any, dotted string) (any, bool) {
 
 // TestChart_IdentityKeysAnnotation (ADR 0113): Chart.yaml carries the annotation, it is valid JSON
 // naming only shared settings, every path it maps exists with a default in values.yaml, and it maps
-// exactly booth-api's four settings (no workload or iframe issuer: booth-api verifies neither).
+// exactly booth-api's five settings (no workload or iframe issuer: booth-api verifies neither).
 func TestChart_IdentityKeysAnnotation(t *testing.T) {
+	raw, values := readIdentityKeys(t)
+	mapping, problems := checkIdentityKeys(raw, values)
+	for _, p := range problems {
+		t.Errorf("%s: %s\nvalue: %s", identityKeysAnnotation, p, raw)
+	}
+	want := map[string]string{
+		"issuerUrl": "oidc.issuerUrl", "clientId": "oidc.clientId",
+		"jwksUrl": "oidc.jwksUrl", "groupsClaim": "oidc.groupsClaim",
+		"coreUrl": "core.url",
+	}
+	if fmt.Sprint(mapping) != fmt.Sprint(want) {
+		t.Errorf("%s = %v, want %v", identityKeysAnnotation, mapping, want)
+	}
+	if v, ok := valueAtPath(values, "core.url"); !ok || v != "" {
+		t.Errorf("values.yaml core.url = %#v (present %v), want the empty default kept for Helm-CLI installs", v, ok)
+	}
+
+	// The checks above really do fail on each kind of mistake.
+	for name, bad := range map[string]string{
+		"invalid JSON":         `{"issuerUrl": "oidc.issuerUrl",}`,
+		"empty":                `{}`,
+		"unknown key":          `{"issuer": "oidc.issuerUrl"}`,
+		"path with no default": `{"issuerUrl": "oidc.issuer"}`,
+		"path through a leaf":  `{"groupsClaim": "oidc.groupsClaim.name"}`,
+		"core path misspelt":   `{"coreUrl": "core.coreUrl"}`,
+	} {
+		if _, problems := checkIdentityKeys(bad, values); len(problems) == 0 {
+			t.Errorf("%s: %s was accepted", name, bad)
+		}
+	}
+}
+
+// Amendment 1: the path the annotation maps coreUrl to is the one the chart really uses. Setting it
+// (as core's install API does) puts that URL in the Deployment's BOOTH_CORE_URL and turns on the data
+// path (workloadIdentity.mint), so the annotation can't point at a key no template reads.
+func TestChart_IdentityKeysCoreURLRenders(t *testing.T) {
+	requireHelm(t)
+	raw, values := readIdentityKeys(t)
+	mapping, _ := checkIdentityKeys(raw, values)
+	path, ok := mapping["coreUrl"]
+	if !ok {
+		t.Fatalf("%s doesn't map coreUrl", identityKeysAnnotation)
+	}
+	const stub = "http://stub-core.stub-ns.svc:8080"
+	rendered := helmTemplate(t, "--set", path+"="+stub)
+	var env map[string]any
+	for _, d := range docs(t, rendered) {
+		if d["kind"] != "Deployment" {
+			continue
+		}
+		spec := d["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+		for _, e := range spec["containers"].([]any)[0].(map[string]any)["env"].([]any) {
+			if ev := e.(map[string]any); ev["name"] == "BOOTH_CORE_URL" {
+				env = ev
+			}
+		}
+	}
+	if env == nil || env["value"] != stub {
+		t.Errorf("--set %s=%s: Deployment BOOTH_CORE_URL = %v, want %q", path, stub, env, stub)
+	}
+	if !strings.Contains(string(rendered), "workloadIdentity:\n    mint: true") {
+		t.Errorf("--set %s=%s: the manifest doesn't declare workloadIdentity.mint", path, stub)
+	}
+}
+
+// readIdentityKeys returns the annotation's raw value and the chart's parsed values.yaml.
+func readIdentityKeys(t *testing.T) (string, map[string]any) {
+	t.Helper()
 	chartBytes, err := os.ReadFile(filepath.Join("..", "..", "charts", "booth-api", "Chart.yaml"))
 	if err != nil {
 		t.Fatal(err)
@@ -371,29 +440,5 @@ func TestChart_IdentityKeysAnnotation(t *testing.T) {
 	if err := yaml.Unmarshal(valuesBytes, &values); err != nil {
 		t.Fatalf("parsing values.yaml: %v", err)
 	}
-
-	mapping, problems := checkIdentityKeys(raw, values)
-	for _, p := range problems {
-		t.Errorf("%s: %s\nvalue: %s", identityKeysAnnotation, p, raw)
-	}
-	want := map[string]string{
-		"issuerUrl": "oidc.issuerUrl", "clientId": "oidc.clientId",
-		"jwksUrl": "oidc.jwksUrl", "groupsClaim": "oidc.groupsClaim",
-	}
-	if fmt.Sprint(mapping) != fmt.Sprint(want) {
-		t.Errorf("%s = %v, want %v", identityKeysAnnotation, mapping, want)
-	}
-
-	// The checks above really do fail on each kind of mistake.
-	for name, bad := range map[string]string{
-		"invalid JSON":         `{"issuerUrl": "oidc.issuerUrl",}`,
-		"empty":                `{}`,
-		"unknown key":          `{"issuer": "oidc.issuerUrl"}`,
-		"path with no default": `{"issuerUrl": "oidc.issuer"}`,
-		"path through a leaf":  `{"groupsClaim": "oidc.groupsClaim.name"}`,
-	} {
-		if _, problems := checkIdentityKeys(bad, values); len(problems) == 0 {
-			t.Errorf("%s: %s was accepted", name, bad)
-		}
-	}
+	return raw, values
 }
