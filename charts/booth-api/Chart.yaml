@@ -7,3 +7,13 @@ type: application
 version: 0.1.0
 appVersion: "0.1.0"
 home: https://github.com/projectbooth/booth-api
+
+# ADR 0113 / contracts/module-manifest.md "Chart annotation: identity keys": tells booth-core's
+# install API which of this chart's values.yaml paths carry the platform's shared identity settings,
+# so an install through the install API (the Module Store's Install button included) is configured
+# without hand-typed values. Core fills a mapped path only when the request doesn't set that leaf.
+# Omitted on purpose: workloadIssuerUrl (booth-api mints workload tokens for its sidecars but never
+# verifies one, so it has no workload-issuer setting) and iframeIssuerUrl (no iframe-proxied UI).
+annotations:
+  booth.projectbooth.io/identity-keys: |
+    {"issuerUrl":"oidc.issuerUrl","clientId":"oidc.clientId","jwksUrl":"oidc.jwksUrl","groupsClaim":"oidc.groupsClaim"}

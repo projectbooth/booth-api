@@ -7,6 +7,7 @@ package contract
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -295,5 +296,104 @@ func TestDockerfile_SidecarPinnedByDigest(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "COPY --from=sidecar /credential-sidecar /credential-sidecar") {
 		t.Error("Dockerfile doesn't copy the sidecar binary to /credential-sidecar (config's default)")
+	}
+}
+
+// identityKeysAnnotation is ADR 0113's chart annotation (contracts/module-manifest.md, "Chart
+// annotation: identity keys").
+const identityKeysAnnotation = "booth.projectbooth.io/identity-keys"
+
+var sharedIdentityKeys = map[string]bool{
+	"issuerUrl": true, "clientId": true, "jwksUrl": true,
+	"workloadIssuerUrl": true, "groupsClaim": true, "iframeIssuerUrl": true,
+}
+
+// checkIdentityKeys returns every problem with an identity-keys annotation value against a
+// values.yaml: not valid JSON, empty, an unknown shared key, or a mapped path with no default
+// (which would make core's install-time merge, and a plain helm install, silently do nothing).
+func checkIdentityKeys(raw string, values map[string]any) (map[string]string, []string) {
+	var mapping map[string]string
+	if err := json.Unmarshal([]byte(raw), &mapping); err != nil {
+		return nil, []string{fmt.Sprintf("not valid JSON: %v", err)}
+	}
+	if len(mapping) == 0 {
+		return nil, []string{"empty object"}
+	}
+	var problems []string
+	for key, path := range mapping {
+		if !sharedIdentityKeys[key] {
+			problems = append(problems, fmt.Sprintf("unknown shared setting %q", key))
+		}
+		if _, ok := valueAtPath(values, path); !ok {
+			problems = append(problems, fmt.Sprintf("%q maps to %q, which has no default in values.yaml", key, path))
+		}
+	}
+	return mapping, problems
+}
+
+func valueAtPath(root map[string]any, dotted string) (any, bool) {
+	cur := any(root)
+	for _, part := range strings.Split(dotted, ".") {
+		m, ok := cur.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		if cur, ok = m[part]; !ok {
+			return nil, false
+		}
+	}
+	return cur, true
+}
+
+// TestChart_IdentityKeysAnnotation (ADR 0113): Chart.yaml carries the annotation, it is valid JSON
+// naming only shared settings, every path it maps exists with a default in values.yaml, and it maps
+// exactly booth-api's four settings (no workload or iframe issuer: booth-api verifies neither).
+func TestChart_IdentityKeysAnnotation(t *testing.T) {
+	chartBytes, err := os.ReadFile(filepath.Join("..", "..", "charts", "booth-api", "Chart.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var chart struct {
+		Annotations map[string]string `yaml:"annotations"`
+	}
+	if err := yaml.Unmarshal(chartBytes, &chart); err != nil {
+		t.Fatalf("parsing Chart.yaml: %v", err)
+	}
+	raw, ok := chart.Annotations[identityKeysAnnotation]
+	if !ok {
+		t.Fatalf("Chart.yaml is missing the %s annotation (ADR 0113)", identityKeysAnnotation)
+	}
+	valuesBytes, err := os.ReadFile(filepath.Join("..", "..", "charts", "booth-api", "values.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var values map[string]any
+	if err := yaml.Unmarshal(valuesBytes, &values); err != nil {
+		t.Fatalf("parsing values.yaml: %v", err)
+	}
+
+	mapping, problems := checkIdentityKeys(raw, values)
+	for _, p := range problems {
+		t.Errorf("%s: %s\nvalue: %s", identityKeysAnnotation, p, raw)
+	}
+	want := map[string]string{
+		"issuerUrl": "oidc.issuerUrl", "clientId": "oidc.clientId",
+		"jwksUrl": "oidc.jwksUrl", "groupsClaim": "oidc.groupsClaim",
+	}
+	if fmt.Sprint(mapping) != fmt.Sprint(want) {
+		t.Errorf("%s = %v, want %v", identityKeysAnnotation, mapping, want)
+	}
+
+	// The checks above really do fail on each kind of mistake.
+	for name, bad := range map[string]string{
+		"invalid JSON":         `{"issuerUrl": "oidc.issuerUrl",}`,
+		"empty":                `{}`,
+		"unknown key":          `{"issuer": "oidc.issuerUrl"}`,
+		"path with no default": `{"issuerUrl": "oidc.issuer"}`,
+		"path through a leaf":  `{"groupsClaim": "oidc.groupsClaim.name"}`,
+	} {
+		if _, problems := checkIdentityKeys(bad, values); len(problems) == 0 {
+			t.Errorf("%s: %s was accepted", name, bad)
+		}
 	}
 }
