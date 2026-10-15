@@ -68,16 +68,24 @@ kubectl -n keycloak rollout status deploy/keycloak --timeout=600s
 echo "--- booth-core"
 kubectl create namespace booth-system --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl apply -f "$CORE_DIR/charts/booth-core/crds/" >/dev/null # helm never updates an existing CRD
+# keycloak.enabled/ingress.enabled=false: this test brings its own Keycloak and talks to core's
+# Service directly (both default to on from core 0.3.x, ADR 0108).
 helm upgrade --install booth-core "$CORE_DIR/charts/booth-core" -n booth-system \
+  --set keycloak.enabled=false --set ingress.enabled=false \
   --set oidc.issuerUrl=$ISSUER --set oidc.clientId=booth-design \
   --set workloadIdentity.issuerUrl=$CORE_URL \
   --set-string iframeSigningKey="$(openssl rand -hex 32)" \
   --set image.repository=booth-core --set image.tag=rs --set image.pullPolicy=Never --wait --timeout 10m >/dev/null
 kubectl -n booth-system rollout status deploy/booth-core --timeout=300s
 
-echo "--- booth-database (bundled PostgreSQL, postgres-kind credential provider)"
+echo "--- booth-database (bundled PostgreSQL, postgres-kind credential provider, database.table.* events)"
+# Tables are published to the Catalog every 10s (ADR 0116). public.* is ignored on top of the
+# chart's defaults so the hand-registered tables of step 3 can't race an auto-listing; the
+# auto-listed case (step 7) uses its own schema.
 kubectl create namespace booth-database --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 helm upgrade --install db "$DATABASE_DIR/charts/booth-database" -n booth-database \
+  --set tableEvents.interval=10s \
+  --set-json 'tableEvents.ignore=["*.schema_migrations","*.alembic_version","*.flyway_schema_history","*.django_migrations","*.__diesel_schema_migrations","public.*"]' \
   --set image.repository=booth-database --set image.tag=rs --set image.pullPolicy=Never --wait --timeout 10m >/dev/null
 
 echo "--- booth-catalog (its own small PostgreSQL: its chart takes a DSN Secret, as in booth-e2e)"

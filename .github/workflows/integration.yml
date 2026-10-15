@@ -32,14 +32,15 @@ jobs:
     # broker, booth-database's provider and booth-core's real credential sidecar, and API keys used
     # on core's real public route (key, scope, workspace isolation, revocation, creator losing
     # access). Pinned, not moving branches (contracts/testing-strategy.md): bump deliberately.
-    #   CORE_REF     cb8e03a: publicRoutes (ADR 0101), core PR #2's merge
-    #   DATABASE_REF bdab4b8: booth-database main, 2026-10-08
-    #   CATALOG_REF  c46f80f: format "postgres" datasets (ADR 0102)
+    # The pins are the releases the homelab runs or can install (ADR 0117 "Reconciled design" 9a):
+    #   CORE_REF     3134737: v0.3.4 (core's default branch is master)
+    #   DATABASE_REF aea9808: v0.1.3 (database.table.* events, ADR 0116; tableEvents.ignore)
+    #   CATALOG_REF  c898575: v0.1.5 (auto-listed postgres datasets from those events)
     runs-on: ubuntu-24.04
     env:
-      CORE_REF: cb8e03a6acf7b530809f67394fbc3f606cae79bd
-      DATABASE_REF: bdab4b82dc662ab4bb4afa9d3084b0b765943eae
-      CATALOG_REF: c46f80f32dcc04206f4a4700de9fad47aaf75757
+      CORE_REF: 3134737a77d5c03cb631b70a277a3d93c7ce771e
+      DATABASE_REF: aea98080f5d3347f1cb11ee1af7950f794584ba6
+      CATALOG_REF: c89857522c7076d6fb3404a8a6048a7880ca03b6
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4

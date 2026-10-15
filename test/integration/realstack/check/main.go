@@ -10,6 +10,8 @@
 //  5. keys are issued, then used on /modules/api/public/v1/... (ADR 0101): scope, workspace
 //     isolation, forged X-Booth-* headers, GraphQL and REST, revocation;
 //  6. a key's creator loses access in Keycloak and signs in again: their key is refused (ADR 0103).
+//  7. a table created in its own schema reaches booth-catalog by booth-database's events (ADR 0116),
+//     and booth-api generates an API from that auto-listed dataset and serves it over REST and GraphQL.
 //
 // Every step prints what it checked; the first failure exits non-zero with what was expected and
 // what came back.
@@ -137,6 +139,20 @@ func main() {
 	expect(resp, 403, "bob's key after bob lost access")
 	must(strings.Contains(resp.body, "creator no longer has access"), "refusal = %s", resp.body)
 	expect(public("GET", "orders/rows", kd, "", nil, nil), 200, "dave's key still works")
+
+	step("7. an auto-listed table (ADR 0116): created in its own schema, never registered by hand")
+	seed(ctx, alice, "acme", `
+		CREATE SCHEMA IF NOT EXISTS nfl_data;
+		CREATE TABLE IF NOT EXISTS nfl_data.games (game_id bigint PRIMARY KEY, home text NOT NULL, away text NOT NULL, home_score int);
+		INSERT INTO nfl_data.games VALUES (1, 'KC', 'BUF', 27), (2, 'DET', 'GB', 31) ON CONFLICT DO NOTHING;`)
+	games := autoListed(alice, "acme", "nfl_data", "games", 3*time.Minute)
+	gamesAPI := generate(alice, "acme", games)
+	slug := fmt.Sprint(gamesAPI["slug"])
+	kg := issue(alice, "acme", "games", games)
+	expect(public("GET", slug+"/rows?order=game_id", kg, "", nil, &rows), 200, "REST on the auto-listed table")
+	must(len(rows.Data) == 2 && rows.Data[0]["game_id"] == "1" && rows.Data[1]["home"] == "DET", "games = %v", rows.Data)
+	expect(public("POST", slug+"/graphql", kg, `{"query":"{ rows(where: {home_score: {gt: 30}}) { nodes { game_id home away } } }"}`, nil, &gq), 200, "GraphQL on the auto-listed table")
+	must(strings.Contains(mustJSON(gq), `"nodes":[{"away":"GB","game_id":"2","home":"DET"}]`), "graphql = %s", mustJSON(gq))
 
 	fmt.Println("\nreal-stack check: OK")
 }
@@ -279,6 +295,32 @@ func dataset(token, workspace, name, table string, schema []map[string]string) s
 		"postgresTable": map[string]string{"schema": "public", "name": table}, "schema": schema, "tags": []string{},
 	}, &out), 201, "catalog registers "+name)
 	return fmt.Sprint(out["id"])
+}
+
+// autoListed waits for booth-database's database.table.* event to reach booth-catalog, and
+// returns the dataset id of the row it created (source "auto").
+func autoListed(token, workspace, schema, table string, wait time.Duration) string {
+	deadline := time.Now().Add(wait)
+	for {
+		var page struct {
+			Items []struct {
+				ID            string                         `json:"id"`
+				Format        string                         `json:"format"`
+				Source        string                         `json:"source"`
+				PostgresTable *struct{ Schema, Name string } `json:"postgresTable"`
+			}
+		}
+		expect(call("GET", "/modules/catalog/api/datasets?limit=200", token, workspace, nil, &page), 200, "list datasets")
+		for _, d := range page.Items {
+			if d.Format == "postgres" && d.PostgresTable != nil && d.PostgresTable.Schema == schema && d.PostgresTable.Name == table {
+				must(d.Source == "auto", "%s.%s is in the catalog with source %q, want auto", schema, table, d.Source)
+				fmt.Printf("ok   %s.%s auto-listed in the catalog as %s\n", schema, table, d.ID)
+				return d.ID
+			}
+		}
+		must(time.Now().Before(deadline), "%s.%s not auto-listed in the catalog after %s", schema, table, wait)
+		time.Sleep(5 * time.Second)
+	}
 }
 
 func generate(token, workspace, datasetID string) map[string]any {
