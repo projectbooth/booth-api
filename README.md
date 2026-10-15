@@ -1,6 +1,6 @@
 # booth-api
 
-Project Booth's API module (Manage nav group): turns a catalog dataset into a read-only REST and
+Project Booth's API module (Manage nav group): turns a catalog dataset into a REST and
 GraphQL API, reachable by anyone holding an API key this module issues.
 
 Scope for v0 is fixed by ADR 0100 in `booth-architecture`: REST (list/get, filtering, pagination,
@@ -137,7 +137,8 @@ curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" "$BASE/
 - `row(<primary key>: ...)` fetches one row (tables with a single-column key).
 - `where` also takes `and`, `or` and `not`.
 - GET with `?query=` works too.
-- There are no mutations; the API is read-only.
+- There are no mutations on the key route; it is read-only. Apps an owner grants write on a
+  separate route with their own workload token (ADR 0117; `docs/contracts/app-writes.md`).
 - The full schema is under "Show GraphQL schema" in the UI, or by introspection.
 
 **Values.** `bigint` and `numeric` come back as strings (`"9007199254740993"`, `"12.50"`), so no
@@ -206,7 +207,22 @@ Built (details and the choices made: `docs/decisions/0001-keys-and-api-definitio
 
 - A real-stack integration test (`hack/realstack-integration.sh`, `docs/decisions/0007`) against real
   Keycloak, booth-core, booth-database and booth-catalog on kind: keys, scope, workspace isolation,
-  revocation and a creator losing access, all through core's gateway and public route.
+  revocation and a creator losing access, all through core's gateway and public route, and app
+  writes.
+
+- App writes (ADR 0117; `docs/decisions/0008`; wire contract `docs/contracts/app-writes.md`):
+  - **Owners turn writes on per API.** Insert by default; update and delete opt-in; writable
+    columns ticked.
+  - **Owners grant apps.** The principal is the app's token subject,
+    `streamlit:<workspace>:<appId>`.
+  - **Apps write on `/modules/api/app/v1/<slug>/...`** (REST and GraphQL mutations) with their own
+    workload token, verified against core's workload issuer.
+  - **Each write runs on a table-scoped `tablewrite` lease** from a write sidecar per (API, granting
+    owner).
+  - **Limits:** one row per request, 10 writes/s per app (burst 50).
+  - **Optional extras:** idempotency keys, and `If-Match` versions.
+  - **Audit:** a write audit log kept 90 days, with no row values.
+  - **Not built yet:** write keys on the public route.
 
 ## Judgment calls in the scaffold (see also `docs/decisions/`)
 

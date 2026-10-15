@@ -1,4 +1,4 @@
-import type { ApiDefinition, ApiKey, CatalogDataset, GraphQLSchema, IssuedKey, Mismatch } from "../types";
+import type { ApiDefinition, ApiKey, CatalogDataset, GraphQLSchema, IssuedKey, Mismatch, WriteGrant, WriteOperation, WritesView } from "../types";
 
 // Mounted inside booth-design's shell, so requests resolve against the shell's origin and go
 // through booth-core's gateway at /modules/{id}/*, which strips the prefix before forwarding. This
@@ -20,6 +20,7 @@ export class ApiError extends Error {
     public status: number,
     message: string,
     public mismatches?: Mismatch[],
+    public problems?: { field: string; problem: string }[],
   ) {
     super(message);
     this.name = "ApiError";
@@ -43,14 +44,16 @@ async function request<T>(ctx: ApiContext, url: string, init: { method?: string;
     const text = await res.text();
     let message = text || `HTTP ${res.status}`;
     let mismatches: Mismatch[] | undefined;
+    let problems: { field: string; problem: string }[] | undefined;
     try {
-      const body = JSON.parse(text) as { error?: string; mismatches?: Mismatch[] };
+      const body = JSON.parse(text) as { error?: string; mismatches?: Mismatch[]; problems?: { field: string; problem: string }[] };
       if (body.error) message = body.error;
       mismatches = body.mismatches;
+      problems = body.problems;
     } catch {
       // not JSON — e.g. a gateway error page
     }
-    throw new ApiError(res.status, message, mismatches);
+    throw new ApiError(res.status, message, mismatches, problems);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -77,6 +80,24 @@ export const issueKey = (ctx: ApiContext, name: string, datasetIds: string[]) =>
 
 export const revokeKey = (ctx: ApiContext, id: string) =>
   request<ApiKey>(ctx, `${BASE}/keys/${encodeURIComponent(id)}/revoke`, { method: "POST" });
+
+// ---- writes (ADR 0117; docs/contracts/app-writes.md). Changing anything needs the owner role. ----
+
+export const getWrites = (ctx: ApiContext, id: string) => request<WritesView>(ctx, `${BASE}/apis/${encodeURIComponent(id)}/writes`);
+
+export const saveWrites = (ctx: ApiContext, id: string, operations: WriteOperation[], columns: string[]) =>
+  request<WritesView>(ctx, `${BASE}/apis/${encodeURIComponent(id)}/writes`, { method: "PUT", body: { operations, columns } });
+
+export const disableWrites = (ctx: ApiContext, id: string) =>
+  request<{ revokedGrants: number; databaseRevoked: boolean; databaseError?: string }>(ctx, `${BASE}/apis/${encodeURIComponent(id)}/writes`, {
+    method: "DELETE",
+  });
+
+export const listGrants = (ctx: ApiContext, apiId: string) =>
+  request<{ items: WriteGrant[] }>(ctx, `${BASE}/write-grants?apiId=${encodeURIComponent(apiId)}`).then((r) => r.items);
+
+export const revokeGrant = (ctx: ApiContext, id: string) =>
+  request<WriteGrant>(ctx, `${BASE}/write-grants/${encodeURIComponent(id)}/revoke`, { method: "POST" });
 
 /** booth-catalog's page size cap (its asset.MaxLimit); pages beyond MAX_PAGES aren't fetched. */
 const CATALOG_PAGE = 200;
