@@ -135,6 +135,24 @@
       ]
     },
     {
+      "username": "erin",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "erin@example.test",
+      "firstName": "Erin",
+      "lastName": "Test",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "__TEST_PASSWORD__",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/workspaces/acme/owner"
+      ]
+    },
+    {
       "username": "carol",
       "enabled": true,
       "emailVerified": true,
