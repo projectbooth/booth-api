@@ -30,6 +30,11 @@ booth-core (its API, the gateway and the public route):
 6. Revoke a key: the next request is 401, and other keys are unaffected.
 7. Remove bob from `acme` in Keycloak and have him sign in again: his key (never used before, so
    no sidecar is running for him) is refused with 403 at minting, while dave's key keeps working.
+8. Create `nfl_data.games` in `acme`'s database and register nothing: booth-database's
+   `database.table.*` event makes booth-catalog list it (`source: "auto"`, ADR 0116). Generate an API
+   from that dataset, and read it with a key over REST and GraphQL. booth-database publishes every
+   10 s here and ignores `public.*` on top of its defaults, so step 3's hand-registered tables can't
+   race an auto-listing.
 
 ## What it doesn't cover
 
@@ -43,5 +48,7 @@ booth-core (its API, the gateway and the public route):
 
 ## Pins
 
-`CORE_REF` (cb8e03a, publicRoutes), `DATABASE_REF` (bdab4b8), `CATALOG_REF` (c46f80f, ADR 0102),
-bumped deliberately, the same practice as booth-logging's `real-core` job.
+`CORE_REF` (v0.3.4, `3134737`), `DATABASE_REF` (v0.1.3, `aea9808`), `CATALOG_REF` (v0.1.5,
+`c898575`), bumped deliberately, the same practice as booth-logging's `real-core` job. Core 0.3.x
+bundles Keycloak and an Ingress by default; the script turns both off (it brings its own Keycloak
+and talks to core's Service).
