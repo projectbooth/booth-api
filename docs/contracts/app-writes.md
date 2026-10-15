@@ -1,20 +1,25 @@
 # Contract: app writes through booth-api
 
-Version: v0 (ADR 0117 and its "Reconciled design"; booth-api `docs/decisions/0008`). Owned by
+Version: v0 (ADR 0117, its "Reconciled design" and item 1a; booth-api `docs/decisions/0008`). Owned by
 `booth-api`. Written for `booth-streamlit` (the "Write targets" panel, the write proxy, take-ownership)
 and `booth-storage` (whose upload grants follow the same shape), and for anyone building against
 either.
 
-Two surfaces:
+Three surfaces:
 
 1. **The grant management API**: owner-only routes on booth-api's ordinary management API, called
-   with a person's own sign-in token. booth-streamlit calls them *as the signed-in owner*.
-2. **The app write route**: what an app's Streamlit gate forwards an app's write to, with the
+   with a person's own sign-in token from booth-api's own page in the shell (the Writes panel).
+2. **The revoke-only service path**: `revoke-principal` also accepts booth-streamlit's own grants
+   service token, so take-ownership can revoke an app's grants (ADR 0117 item 1a).
+3. **The app write route**: what an app's Streamlit gate forwards an app's write to, with the
    app's own workload token.
 
-booth-api holds the grants (ADR 0117 "Reconciled design" item 1). booth-streamlit keeps a copy only
-for the app header and early refusal; a write needs booth-streamlit's declaration **and** booth-api's
-live grant.
+booth-api holds the grants (ADR 0117 "Reconciled design" item 1). booth-streamlit never holds a
+person's token, so it doesn't make grants (item 1a):
+- The owner grants on booth-api's Writes panel. booth-streamlit's "Write targets" panel links there
+  with the app filled in (see "Linking to the grant form").
+- booth-streamlit keeps the app-side declaration for the app header and early refusal.
+- A write needs booth-streamlit's declaration **and** booth-api's live grant.
 
 ## Principals
 
@@ -25,8 +30,9 @@ A grant names the **literal subject the caller's token carries**:
 | `streamlit:<workspace>:<appId>` | a booth-streamlit app's workload token (`<appId>` matches `[A-Za-z0-9._-]{1,128}`) | built |
 | `key:<keyId>` | a write-enabled API key on the public route | **not built**: the grants table accepts the shape, the API refuses it with `422` |
 
-`<workspace>` must be the workspace the grant is made in. `streamlit:<workspace>:sources` is
-booth-streamlit's own catalog-listing identity and is never a valid principal.
+`<workspace>` must be the workspace the grant is made in. `streamlit:<workspace>:sources` (catalog
+listing) and `streamlit:<workspace>:grants` (the grants service) are booth-streamlit's own
+identities. They are never valid principals, and never accepted as app tokens.
 
 ## 1. Management API
 
@@ -105,7 +111,7 @@ does that automatically.
 GET  /api/write-grants                      owner   ?apiId=&principal=&includeRevoked=true
 POST /api/write-grants                      owner   {"apiId", "principal", "operations"?, "columns"?}
 POST /api/write-grants/{grantId}/revoke     owner
-POST /api/write-grants/revoke-principal     owner   {"principal"}
+POST /api/write-grants/revoke-principal     owner, or booth-streamlit's grants service   {"principal"}
 ```
 
 A grant:
@@ -122,7 +128,7 @@ A grant:
     follows later changes to the settings. A list narrows to those columns.
   - Both can only narrow the API's settings. Widening them is `422`.
   - **A second grant for the same app and API replaces the first**, which is revoked in the same
-    transaction. So a "save" in booth-streamlit's panel is just this call.
+    transaction. So changing an app's grant on the Writes panel is just this call.
   - Refusals:
     - `409`: writes are off for the API.
     - `400`: the principal isn't an app in this workspace.
@@ -138,6 +144,50 @@ A grant:
   this on take-ownership, as part of the same step as the owner change, and must fail closed** if
   booth-api can't be reached or answers non-2xx: the owner change doesn't happen. It is idempotent
   (`revoked: 0` the second time).
+
+### The revoke-only service path (ADR 0117 item 1a)
+
+booth-streamlit makes the take-ownership call with a workload token it mints for itself through
+core: subject exactly `streamlit:<workspace>:grants`, roleCeiling viewer (revoking only ever reduces
+privilege). It sends the token through core's gateway as usual:
+
+```
+POST /modules/api/api/write-grants/revoke-principal
+Authorization: Bearer <grants service token>      X-Workspace: <workspace>
+{"principal": "streamlit:<workspace>:<appId>"}
+```
+
+- **Verification.** booth-api verifies the token against core's **workload issuer**
+  (`oidc.workloadIssuerUrl`). It must carry `booth_module: streamlit` and core's single workspace
+  group, for the same workspace as the subject. The workspace is taken from the token; headers are
+  ignored.
+- **What it may revoke.** Only principals `streamlit:<that workspace>:<appId>`:
+  - another workspace's app, `:sources` or `:grants` → `400`;
+  - `key:…` → `422`.
+- **Responses.** The same as for an owner: `{"revoked": n, "items": [...]}`. The second call answers
+  `revoked: 0`. Each grant's `revokedBy` is the service's subject.
+- **Everywhere else, the token is refused.** That includes creating, listing or revoking a single
+  grant, write settings, the write log, APIs and keys. The people's verifier answers `401`. An app's
+  own token (`streamlit:<ws>:<appId>`) is refused here too (`401`).
+- **booth-api must have `oidc.workloadIssuerUrl` set.** Without it this path is off, and only owners
+  can call `revoke-principal`.
+
+### Linking to the grant form
+
+booth-streamlit's "Write targets" panel links an owner to booth-api's page with the grant prefilled:
+
+```
+/apis?writeApi=<API slug or id>&writePrincipal=streamlit:<workspace>:<appId>
+```
+
+- **The parameters.** Both are URL-encoded. `writeApi` matches the API's slug, which booth-streamlit
+  stores in its declaration, or its id.
+- **For an owner,** the page opens that API's Writes panel with the principal filled in. Choosing
+  operations and columns and pressing Grant still needs the owner. Nothing is granted by the link
+  alone.
+- **For an editor or viewer,** the page says only an owner can grant.
+- **For an unknown API,** the page says so.
+- **When writes are off for the API,** the owner must turn them on first; the panel says so.
 
 ## 2. The app write route
 

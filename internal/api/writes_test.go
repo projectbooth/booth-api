@@ -8,8 +8,10 @@ import (
 
 	"github.com/projectbooth/booth-api/internal/api"
 	"github.com/projectbooth/booth-api/internal/apis"
+	"github.com/projectbooth/booth-api/internal/appauth"
 	"github.com/projectbooth/booth-api/internal/auth"
 	"github.com/projectbooth/booth-api/internal/auth/authtest"
+	"github.com/projectbooth/booth-api/internal/store"
 	"github.com/projectbooth/booth-api/internal/writes/writestest"
 )
 
@@ -116,4 +118,91 @@ func TestWriteManagement(t *testing.T) {
 func fmtJSON(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+// ADR 0117 item 1a: booth-streamlit's grants service token (subject streamlit:<ws>:grants, minted by
+// core for module streamlit) may call revoke-principal for its own workspace's apps, and nothing else.
+func TestGrantsServiceRevokeOnly(t *testing.T) {
+	w := writestest.New(t)
+	def := w.API("entries")
+	ctx := context.Background()
+	alice := auth.Identity{Subject: "alice", DisplayName: "Alice", Workspace: "acme", Role: auth.RoleOwner}
+	if _, err := w.Service.SaveSettings(ctx, alice, def.ID, []string{"insert"}, []string{"amount", "entered_by"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Service.Grant(ctx, alice, def.ID, "streamlit:acme:budget", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	idp, core := authtest.New(t), authtest.New(t)
+	v, err := auth.NewVerifier(ctx, auth.OIDCConfig{IssuerURL: idp.URL, ClientID: "booth-api"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sv, err := appauth.NewVerifier(ctx, appauth.Config{IssuerURL: core.URL, ClientID: "booth-api"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &env{t: t, idp: idp, h: api.NewHandler(api.Deps{
+		Verifier:        func() auth.TokenVerifier { return v },
+		ServiceVerifier: func() appauth.ServiceVerifier { return sv },
+		APIs:            apis.Service{Store: w.Store},
+		Writes:          w.Service,
+	})}
+	workload := func(sub, module, group string) string {
+		return core.Mint(t, authtest.Token{Subject: sub, Groups: []string{group}, Extra: map[string]any{"booth_module": module}})
+	}
+	svc := workload("streamlit:acme:grants", "streamlit", "/workspaces/acme/viewer")
+	rp := "/api/write-grants/revoke-principal"
+
+	// Refused on every other route, the grant routes included.
+	base := "/api/apis/" + def.ID + "/writes"
+	for _, c := range []struct{ method, path string }{
+		{"GET", "/api/apis"}, {"GET", base}, {"PUT", base}, {"DELETE", base}, {"GET", base + "/log"},
+		{"GET", "/api/write-grants"}, {"POST", "/api/write-grants"}, {"POST", "/api/write-grants/x/revoke"}, {"GET", "/api/keys"},
+	} {
+		rec, _ := e.do(svc, "acme", c.method, c.path, map[string]any{"apiId": def.ID, "principal": "streamlit:acme:x", "operations": []string{"insert"}, "columns": []string{"amount"}})
+		if rec.Code != 401 && rec.Code != 403 {
+			t.Errorf("grants service token on %s %s: %d", c.method, c.path, rec.Code)
+		}
+	}
+	// Only principals in its own workspace, never its own identities, never keys.
+	for p, want := range map[string]int{"streamlit:globex:budget": 400, "streamlit:acme:sources": 400, "streamlit:acme:grants": 400, "key:abc": 422} {
+		rec, _ := e.do(svc, "acme", "POST", rp, map[string]string{"principal": p})
+		e.want(rec, want, "grants service revoking "+p)
+	}
+	// Tokens that aren't the grants service's, even if close.
+	for name, tok := range map[string]string{
+		"an app's own token":            workload("streamlit:acme:budget", "streamlit", "/workspaces/acme/viewer"),
+		"another module minted it":      workload("streamlit:acme:grants", "pipeline", "/workspaces/acme/viewer"),
+		"workspace group mismatch":      workload("streamlit:acme:grants", "streamlit", "/workspaces/globex/viewer"),
+		"signed by the people's issuer": idp.Mint(t, authtest.Token{Subject: "streamlit:acme:grants", Groups: []string{"/workspaces/acme/viewer"}, Extra: map[string]any{"booth_module": "streamlit"}}),
+	} {
+		rec, _ := e.do(tok, "acme", "POST", rp, map[string]string{"principal": "streamlit:acme:budget"})
+		if rec.Code != 401 && rec.Code != 403 {
+			t.Errorf("%s: %d", name, rec.Code)
+		}
+	}
+	// The workspace is the token's: a forged header can't point it at another workspace.
+	rec, got := e.do(svc, "globex", "POST", rp, map[string]string{"principal": "streamlit:globex:budget"})
+	e.want(rec, 400, "grants service with a forged workspace header")
+	// The real thing, then the idempotent second call.
+	rec, got = e.do(svc, "acme", "POST", rp, map[string]string{"principal": "streamlit:acme:budget"})
+	e.want(rec, 200, "grants service revokes an app's grants")
+	if got["revoked"] != float64(1) {
+		t.Errorf("first revoke = %v", got)
+	}
+	rec, got = e.do(svc, "acme", "POST", rp, map[string]string{"principal": "streamlit:acme:budget"})
+	e.want(rec, 200, "the second call")
+	if got["revoked"] != float64(0) {
+		t.Errorf("second revoke = %v", got)
+	}
+	gs, _ := w.Service.Grants(ctx, "acme", store.GrantFilter{IncludeRevoked: true})
+	if len(gs) != 1 || gs[0].RevokedBy != "streamlit:acme:grants" {
+		t.Errorf("grants = %+v (revokedBy should name the service)", gs)
+	}
+	// An owner can still call it.
+	rec, _ = e.do(e.token("alice", "/workspaces/acme/owner"), "acme", "POST", rp, map[string]string{"principal": "streamlit:acme:budget"})
+	e.want(rec, 200, "an owner")
+	rec, _ = e.do(e.token("ed", "/workspaces/acme/editor"), "acme", "POST", rp, map[string]string{"principal": "streamlit:acme:budget"})
+	e.want(rec, 403, "an editor")
 }

@@ -96,6 +96,9 @@ export const disableWrites = (ctx: ApiContext, id: string) =>
 export const listGrants = (ctx: ApiContext, apiId: string) =>
   request<{ items: WriteGrant[] }>(ctx, `${BASE}/write-grants?apiId=${encodeURIComponent(apiId)}`).then((r) => r.items);
 
+export const createGrant = (ctx: ApiContext, apiId: string, principal: string, operations: WriteOperation[], columns: string[] | null) =>
+  request<WriteGrant>(ctx, `${BASE}/write-grants`, { method: "POST", body: { apiId, principal, operations, columns } });
+
 export const revokeGrant = (ctx: ApiContext, id: string) =>
   request<WriteGrant>(ctx, `${BASE}/write-grants/${encodeURIComponent(id)}/revoke`, { method: "POST" });
 

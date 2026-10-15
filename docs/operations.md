@@ -56,8 +56,10 @@ helm upgrade --install booth-api charts/booth-api -n booth-api --create-namespac
 
 **Who controls what:**
 - Workspace owners turn writes on per API (**API** page, or `PUT /api/apis/{id}/writes`) and
-  grant apps (`docs/contracts/app-writes.md`). booth-streamlit's "Write targets" panel makes the
-  grants.
+  grant apps on the same panel (`docs/contracts/app-writes.md`). booth-streamlit's "Write targets"
+  panel links there with the app filled in. On take-ownership, booth-streamlit revokes the app's
+  grants with its own grants service token (`streamlit:<workspace>:grants`), which booth-api accepts
+  on that one route only.
 
 **The write sidecars:**
 - Each write runs on a write sidecar: one per (API, granting owner), with token subject

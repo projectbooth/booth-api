@@ -15,7 +15,8 @@
 //  8. app writes (ADR 0117): an owner turns writes on and grants an app; the app writes with its own
 //     workload token (minted with a stand-in streamlit module's credential); owners only; app tokens
 //     only write; the table-scoped lease can't touch another table or run DDL; removing the granting
-//     owner stops writes at the next mint; revoking stops writes; turning writes off ends the lease.
+//     owner stops writes at the next mint; revoking stops writes (booth-streamlit's grants service
+//     token may revoke an app's grants and nothing else); turning writes off ends the lease.
 //
 // Every step prints what it checked; the first failure exits non-zero with what was expected and
 // what came back.
@@ -257,10 +258,21 @@ func main() {
 	must(len(grants.Items) == 1, "grants = %v", grants.Items)
 	expect(call("POST", "/modules/api/api/write-grants/"+fmt.Sprint(grants.Items[0]["id"])+"/revoke", alice, "acme", nil, nil), 200, "alice revokes budget's grant")
 	expect(app("POST", wslug+"/rows", budget, "acme", rowIns, nil), 403, "budget after revocation")
+	// booth-streamlit's take-ownership path (ADR 0117 item 1a): its own grants service token may
+	// revoke an app's grants, and nothing else.
+	grantsSvc := mintApp("grants", aliceSub)
+	expect(call("POST", "/modules/api/api/write-grants", grantsSvc, "acme", map[string]any{"apiId": wid, "principal": "streamlit:acme:other"}, nil), 401,
+		"the grants service token can't create a grant")
+	expect(call("GET", "/modules/api/api/write-grants", grantsSvc, "acme", nil, nil), 401, "the grants service token can't list grants")
+	expect(call("POST", "/modules/api/api/write-grants/revoke-principal", grantsSvc, "acme", map[string]string{"principal": "streamlit:globex:budget"}, nil), 400,
+		"the grants service token can't revoke in another workspace")
 	var rp map[string]any
-	expect(call("POST", "/modules/api/api/write-grants/revoke-principal", alice, "acme", map[string]string{"principal": "streamlit:acme:other"}, &rp), 200,
-		"revoke every grant for the other app in one call")
+	expect(call("POST", "/modules/api/api/write-grants/revoke-principal", grantsSvc, "acme", map[string]string{"principal": "streamlit:acme:other"}, &rp), 200,
+		"booth-streamlit's grants service revokes every grant for the other app in one call")
 	must(rp["revoked"] == float64(1), "revoke-principal = %v", rp)
+	expect(call("POST", "/modules/api/api/write-grants/revoke-principal", grantsSvc, "acme", map[string]string{"principal": "streamlit:acme:other"}, &rp), 200,
+		"the second call")
+	must(rp["revoked"] == float64(0), "second revoke-principal = %v", rp)
 	var wlog struct{ Items []map[string]any }
 	expect(call("GET", wbase+"/log?limit=100", alice, "acme", nil, &wlog), 200, "the write audit log")
 	must(len(wlog.Items) >= 6 && !strings.Contains(mustJSON(wlog), "rs-row-value"), "audit = %s (entries, and never row values)", mustJSON(wlog))

@@ -162,6 +162,12 @@ func run() error {
 				APIs:   apis.Service{Catalog: &catalog.Client{CoreURL: cfg.CoreURL}, Store: st, Pools: pools},
 				Keys:   keys.Service{Store: st},
 				Writes: ws,
+				ServiceVerifier: func() appauth.ServiceVerifier {
+					if v := appVerifier.Load(); v != nil {
+						return v
+					}
+					return nil
+				},
 			}),
 			Public: public.NewHandler(public.Deps{Keys: keys.Service{Store: st}, APIs: st, Pools: pools, Limits: gql.DefaultLimits}),
 			App: appwrite.NewHandler(appwrite.Deps{

@@ -232,7 +232,7 @@ describe("ApiApp", () => {
       await user.click(await screen.findByRole("button", { name: "Let apps write…" }));
       expect(await screen.findByLabelText("Add rows")).toBeChecked();
       expect(screen.getByText(/Writes are off: no app can change/)).toBeInTheDocument();
-      expect(screen.getByText(/Each app also needs a grant, made from that app's settings page in Streamlit/)).toBeInTheDocument();
+      expect(screen.getByText(/Each app also needs its own grant, made under "Grant an app" here/)).toBeInTheDocument();
       expect(screen.getByText(/a primary-key column the database fills in/)).toBeInTheDocument();
       const save = screen.getByRole("button", { name: "Turn writes on" });
       expect(save).toBeDisabled();
@@ -259,6 +259,63 @@ describe("ApiApp", () => {
       await user.click(screen.getByRole("button", { name: "Writes" }));
       expect(await screen.findByText(/Only workspace owners change this/)).toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "Turn writes off" })).not.toBeInTheDocument();
+    });
+
+    const writable = { ...base, "GET /modules/api/api/apis": () => ({ status: 200, body: { items: [{ ...orders, writes: { ...on, operations: ["insert", "update"] } }] } }) };
+
+    it("lets an owner grant an app, narrowing its actions and columns", async () => {
+      const calls = mockFetch({
+        ...writable,
+        "GET /modules/api/api/apis/api-1/writes": () => view({ ...on, operations: ["insert", "update"], columns: ["amount", "note"] }),
+        "GET /modules/api/api/write-grants": () => ({ status: 200, body: { items: [] } }),
+        "POST /modules/api/api/write-grants": (b) => ({ status: 201, body: { id: "g9", grantedByName: "Alice", revokedAt: null, ...(b as object) } }),
+      });
+      const user = userEvent.setup();
+      render(<ApiApp workspace="acme" role="owner" theme="light" getAccessToken={() => "tok"} />);
+      await user.click(await screen.findByRole("button", { name: "Writes" }));
+      const grant = await screen.findByRole("button", { name: "Grant" });
+      expect(grant).toBeDisabled();
+      const form = within(grant.closest("form") as HTMLElement);
+      await user.type(form.getByLabelText("App"), "streamlit:acme:budget");
+      await user.click(form.getByRole("checkbox", { name: "Change rows" }));
+      await user.click(form.getByRole("checkbox", { name: "Only some of the writable columns" }));
+      await user.click(form.getByRole("checkbox", { name: "note" }));
+      await user.click(grant);
+      expect(await screen.findByText(/Granted\. streamlit:acme:budget can now add rows and change rows/)).toBeInTheDocument();
+      expect(calls.find((c) => c.method === "POST" && c.url.endsWith("/write-grants"))?.body).toEqual({
+        apiId: "api-1",
+        principal: "streamlit:acme:budget",
+        operations: ["insert", "update"],
+        columns: ["amount"],
+      });
+    });
+
+    describe("arriving from booth-streamlit's link", () => {
+      afterEach(() => window.history.replaceState({}, "", "/"));
+
+      it("opens the API's Writes with the app filled in for an owner", async () => {
+        window.history.replaceState({}, "", "/apis?writeApi=orders&writePrincipal=streamlit%3Aacme%3Abudget");
+        mockFetch({
+          ...writable,
+          "GET /modules/api/api/apis/api-1/writes": () => view(on),
+          "GET /modules/api/api/write-grants": () => ({ status: 200, body: { items: [] } }),
+        });
+        render(<ApiApp workspace="acme" role="owner" theme="light" getAccessToken={() => "tok"} />);
+        expect(await screen.findByRole("status")).toHaveTextContent("Grant streamlit:acme:budget writes to Orders");
+        expect(await screen.findByLabelText("App")).toHaveValue("streamlit:acme:budget");
+      });
+
+      it("tells a non-owner to ask an owner, and names an unknown API", async () => {
+        window.history.replaceState({}, "", "/apis?writeApi=api-1&writePrincipal=streamlit%3Aacme%3Abudget");
+        mockFetch(writable);
+        const { unmount } = render(<ApiApp workspace="acme" role="editor" theme="light" getAccessToken={() => "tok"} />);
+        expect(await screen.findByRole("status")).toHaveTextContent("Only a workspace owner can grant that");
+        expect(screen.queryByLabelText("App")).not.toBeInTheDocument();
+        unmount();
+        window.history.replaceState({}, "", "/apis?writeApi=nope&writePrincipal=streamlit%3Aacme%3Abudget");
+        render(<ApiApp workspace="acme" role="owner" theme="light" getAccessToken={() => "tok"} />);
+        expect(await screen.findByRole("status")).toHaveTextContent("there is no such API in this workspace");
+      });
     });
 
     it("lets an owner revoke an app's grant and turn writes off", async () => {
