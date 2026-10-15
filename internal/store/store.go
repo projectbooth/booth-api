@@ -43,12 +43,21 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 
 // ---- APIs --------------------------------------------------------------------------------
 
-const apiColumns = `id, workspace, dataset_id, dataset_name, slug, table_schema, table_name, columns, primary_key, created_by, created_at, generated_at`
+// apiSelect reads an API with its write settings (ADR 0117), if any.
+const apiSelect = `SELECT a.id, a.workspace, a.dataset_id, a.dataset_name, a.slug, a.table_schema, a.table_name, a.columns, a.primary_key,
+	a.created_by, a.created_at, a.generated_at, a.snapshot_version,
+	w.operations, w.columns, w.version, w.updated_by, w.updated_at
+	FROM apis a LEFT JOIN api_writes w ON w.api_id = a.id`
 
 func scanAPI(row pgx.Row) (apidef.Definition, error) {
 	var d apidef.Definition
 	var cols, pk []byte
-	err := row.Scan(&d.ID, &d.Workspace, &d.DatasetID, &d.DatasetName, &d.Slug, &d.Table.Schema, &d.Table.Name, &cols, &pk, &d.CreatedBy, &d.CreatedAt, &d.GeneratedAt)
+	var ops, wcols []string
+	var version *int64
+	var updatedBy *string
+	var updatedAt *time.Time
+	err := row.Scan(&d.ID, &d.Workspace, &d.DatasetID, &d.DatasetName, &d.Slug, &d.Table.Schema, &d.Table.Name, &cols, &pk,
+		&d.CreatedBy, &d.CreatedAt, &d.GeneratedAt, &d.SnapshotVersion, &ops, &wcols, &version, &updatedBy, &updatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return d, ErrNotFound
 	}
@@ -60,6 +69,12 @@ func scanAPI(row pgx.Row) (apidef.Definition, error) {
 	}
 	if err := json.Unmarshal(pk, &d.PrimaryKey); err != nil {
 		return d, fmt.Errorf("decoding stored primary key: %w", err)
+	}
+	if version != nil {
+		d.Writes = &apidef.WriteSettings{Operations: ops, Columns: wcols, Version: *version, UpdatedBy: *updatedBy, UpdatedAt: *updatedAt}
+		if d.Writes.Columns == nil {
+			d.Writes.Columns = []string{}
+		}
 	}
 	return d, nil
 }
@@ -76,13 +91,13 @@ func (s *Store) CreateAPI(ctx context.Context, d apidef.Definition) (apidef.Defi
 		return d, err
 	}
 	for n := 1; n <= maxSlugAttempts; n++ {
-		row := s.pool.QueryRow(ctx, `INSERT INTO apis (workspace, dataset_id, dataset_name, slug, table_schema, table_name, columns, primary_key, created_by)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING `+apiColumns,
-			d.Workspace, d.DatasetID, d.DatasetName, apidef.Slug(d.DatasetName, n), d.Table.Schema, d.Table.Name, cols, pk, d.CreatedBy)
-		out, err := scanAPI(row)
+		var id string
+		err := s.pool.QueryRow(ctx, `INSERT INTO apis (workspace, dataset_id, dataset_name, slug, table_schema, table_name, columns, primary_key, created_by, snapshot_version)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+			d.Workspace, d.DatasetID, d.DatasetName, apidef.Slug(d.DatasetName, n), d.Table.Schema, d.Table.Name, cols, pk, d.CreatedBy, apidef.SnapshotVersion).Scan(&id)
 		switch constraint(err) {
 		case "":
-			return out, err
+			return s.GetAPI(ctx, d.Workspace, id)
 		case "apis_one_per_dataset":
 			return d, ErrExists
 		case "apis_slug_unique":
@@ -95,14 +110,37 @@ func (s *Store) CreateAPI(ctx context.Context, d apidef.Definition) (apidef.Defi
 }
 
 // UpdateSnapshot replaces an API's table snapshot (regeneration). The id, slug and keys are kept.
-func (s *Store) UpdateSnapshot(ctx context.Context, d apidef.Definition) (apidef.Definition, error) {
+// If writes are on, writableColumns (the columns that may stay writable under the new snapshot) is
+// intersected with the stored settings in the same transaction, so a regenerate never widens what
+// can be written: a new column is never writable until an owner ticks it, and a dropped one leaves
+// the set. The settings version is bumped when that changes the set.
+func (s *Store) UpdateSnapshot(ctx context.Context, d apidef.Definition, writableColumns []string) (apidef.Definition, error) {
 	cols, pk, err := marshalSnapshot(d)
 	if err != nil {
 		return d, err
 	}
-	return scanAPI(s.pool.QueryRow(ctx, `UPDATE apis SET dataset_name = $3, table_schema = $4, table_name = $5, columns = $6, primary_key = $7, generated_at = now()
-		WHERE workspace = $1 AND id = $2 RETURNING `+apiColumns,
-		d.Workspace, d.ID, d.DatasetName, d.Table.Schema, d.Table.Name, cols, pk))
+	if writableColumns == nil {
+		writableColumns = []string{}
+	}
+	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE apis SET dataset_name = $3, table_schema = $4, table_name = $5, columns = $6, primary_key = $7,
+			generated_at = now(), snapshot_version = $8 WHERE workspace = $1 AND id = $2`,
+			d.Workspace, d.ID, d.DatasetName, d.Table.Schema, d.Table.Name, cols, pk, apidef.SnapshotVersion)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		_, err = tx.Exec(ctx, `UPDATE api_writes SET
+			columns = ARRAY(SELECT c FROM unnest(columns) c WHERE c = ANY($2::text[])), version = version + 1, updated_at = now()
+			WHERE api_id = $1 AND NOT (columns <@ $2::text[])`, d.ID, writableColumns)
+		return err
+	})
+	if err != nil {
+		return d, err
+	}
+	return s.GetAPI(ctx, d.Workspace, d.ID)
 }
 
 func marshalSnapshot(d apidef.Definition) (cols, pk []byte, err error) {
@@ -121,17 +159,17 @@ func marshalSnapshot(d apidef.Definition) (cols, pk []byte, err error) {
 
 // GetAPI returns one API in the workspace.
 func (s *Store) GetAPI(ctx context.Context, workspace, id string) (apidef.Definition, error) {
-	return scanAPI(s.pool.QueryRow(ctx, `SELECT `+apiColumns+` FROM apis WHERE workspace = $1 AND id = $2`, workspace, id))
+	return scanAPI(s.pool.QueryRow(ctx, apiSelect+` WHERE a.workspace = $1 AND a.id = $2`, workspace, id))
 }
 
 // GetAPIBySlug returns the API a public URL names (/v1/<slug>/...).
 func (s *Store) GetAPIBySlug(ctx context.Context, workspace, slug string) (apidef.Definition, error) {
-	return scanAPI(s.pool.QueryRow(ctx, `SELECT `+apiColumns+` FROM apis WHERE workspace = $1 AND slug = $2`, workspace, slug))
+	return scanAPI(s.pool.QueryRow(ctx, apiSelect+` WHERE a.workspace = $1 AND a.slug = $2`, workspace, slug))
 }
 
 // ListAPIs returns the workspace's APIs, by dataset name.
 func (s *Store) ListAPIs(ctx context.Context, workspace string) ([]apidef.Definition, error) {
-	rows, err := s.pool.Query(ctx, `SELECT `+apiColumns+` FROM apis WHERE workspace = $1 ORDER BY lower(dataset_name), slug`, workspace)
+	rows, err := s.pool.Query(ctx, apiSelect+` WHERE a.workspace = $1 ORDER BY lower(a.dataset_name), a.slug`, workspace)
 	if err != nil {
 		return nil, err
 	}

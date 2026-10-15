@@ -14,7 +14,7 @@ import (
 )
 
 func TestMint(t *testing.T) {
-	var got mintRequest
+	var got Request
 	var auth string
 	status, body := 200, ""
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -37,7 +37,7 @@ func TestMint(t *testing.T) {
 
 	exp := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
 	body = `{"token":"jwt","tokenType":"Bearer","expiresAt":"` + exp.Format(time.RFC3339) + `","role":"viewer"}`
-	tok, err := m.Mint(ctx, "acme", "sub-alice")
+	tok, err := m.Mint(ctx, ReadRequest("acme", "sub-alice"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestMint(t *testing.T) {
 	if auth != "Bearer wl.api.cred" {
 		t.Errorf("Authorization = %q", auth)
 	}
-	if got != (mintRequest{Workspace: "acme", Subject: "apikeys:acme", RoleCeiling: "viewer", Owner: "sub-alice"}) {
+	if got != (Request{Workspace: "acme", Subject: "apikeys:acme", RoleCeiling: "viewer", Owner: "sub-alice"}) {
 		t.Errorf("request = %+v", got)
 	}
 
@@ -61,20 +61,49 @@ func TestMint(t *testing.T) {
 		"bad credential":      {401, "invalid minting credential", ErrNotEntitled},
 	} {
 		status, body = tc.status, tc.body
-		if _, err := m.Mint(ctx, "acme", "sub-alice"); !errors.Is(err, tc.want) {
+		if _, err := m.Mint(ctx, ReadRequest("acme", "sub-alice")); !errors.Is(err, tc.want) {
 			t.Errorf("%s: err = %v, want %v", name, err, tc.want)
 		}
 	}
 	status, body = 503, "workload identity is temporarily unavailable"
-	if _, err := m.Mint(ctx, "acme", "x"); err == nil || errors.Is(err, source.ErrOwnerNoAccess) || !strings.Contains(err.Error(), "503") {
+	if _, err := m.Mint(ctx, ReadRequest("acme", "x")); err == nil || errors.Is(err, source.ErrOwnerNoAccess) || !strings.Contains(err.Error(), "503") {
 		t.Errorf("503: %v", err)
 	}
 	status, body = 200, `{"token":"jwt","expiresAt":"`+exp.Format(time.RFC3339)+`","role":"owner"}`
-	if _, err := m.Mint(ctx, "acme", "x"); err == nil || !strings.Contains(err.Error(), "above") {
+	if _, err := m.Mint(ctx, ReadRequest("acme", "x")); err == nil || !strings.Contains(err.Error(), "refusing") {
 		t.Errorf("a role above the ceiling was accepted: %v", err)
 	}
 	status, body = 200, `{"token":""}`
-	if _, err := m.Mint(ctx, "acme", "x"); err == nil {
+	if _, err := m.Mint(ctx, ReadRequest("acme", "x")); err == nil {
 		t.Error("a malformed response was accepted")
+	}
+}
+
+// A write token (ADR 0117): apiwrite:<api-id>, ceiling editor. Core caps an owner at editor; an
+// owner demoted to viewer can no longer back a write, which reads as "no access".
+func TestMintWrite(t *testing.T) {
+	var got Request
+	role := "editor"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		exp := time.Now().Add(10 * time.Minute).UTC().Format(time.RFC3339)
+		_, _ = w.Write([]byte(`{"token":"jwt","expiresAt":"` + exp + `","role":"` + role + `"}`))
+	}))
+	defer srv.Close()
+	m := &Minter{URL: srv.URL, Credential: "c"}
+	ctx := context.Background()
+	if _, err := m.Mint(ctx, WriteRequest("acme", "api-1", "sub-alice")); err != nil {
+		t.Fatal(err)
+	}
+	if got != (Request{Workspace: "acme", Subject: "apiwrite:api-1", RoleCeiling: "editor", Owner: "sub-alice"}) {
+		t.Errorf("request = %+v", got)
+	}
+	role = "viewer"
+	if _, err := m.Mint(ctx, WriteRequest("acme", "api-1", "sub-alice")); !errors.Is(err, source.ErrOwnerNoAccess) {
+		t.Errorf("viewer-capped write token: err = %v, want ErrOwnerNoAccess", err)
+	}
+	role = "owner"
+	if _, err := m.Mint(ctx, WriteRequest("acme", "api-1", "sub-alice")); err == nil || !strings.Contains(err.Error(), "refusing") {
+		t.Errorf("a role above the editor ceiling was accepted: %v", err)
 	}
 }

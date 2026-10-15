@@ -31,15 +31,16 @@ jobs:
     # registered in the catalog, APIs generated through the gateway, data read through core's
     # broker, booth-database's provider and booth-core's real credential sidecar, and API keys used
     # on core's real public route (key, scope, workspace isolation, revocation, creator losing
-    # access). Pinned, not moving branches (contracts/testing-strategy.md): bump deliberately.
-    # The pins are the releases the homelab runs or can install (ADR 0117 "Reconciled design" 9a):
-    #   CORE_REF     3134737: v0.3.4 (core's default branch is master)
-    #   DATABASE_REF aea9808: v0.1.3 (database.table.* events, ADR 0116; tableEvents.ignore)
-    #   CATALOG_REF  c898575: v0.1.5 (auto-listed postgres datasets from those events)
+    # access) and app writes (ADR 0117). Pinned, not moving branches
+    # (contracts/testing-strategy.md): bump deliberately.
+    #   CORE_REF     a562691: v0.3.5 (the tablewrite broker access, apiwrite: reserved to module
+    #                         api; core's default branch is master)
+    #   DATABASE_REF v0.1.4 (4c730d3): table-scoped write leases, access tablewrite (its PR #15)
+    #   CATALOG_REF  c898575: v0.1.5 (auto-listed postgres datasets from database.table.* events)
     runs-on: ubuntu-24.04
     env:
-      CORE_REF: 3134737a77d5c03cb631b70a277a3d93c7ce771e
-      DATABASE_REF: aea98080f5d3347f1cb11ee1af7950f794584ba6
+      CORE_REF: a5626916af39aeb29e6ecc67f428d4fd0ae5d2df
+      DATABASE_REF: v0.1.4
       CATALOG_REF: c89857522c7076d6fb3404a8a6048a7880ca03b6
     steps:
       - uses: actions/checkout@v4

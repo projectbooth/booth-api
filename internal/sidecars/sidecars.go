@@ -20,6 +20,14 @@
 // workspace would carry one person's access for every key there, so a key whose creator had lost
 // access would keep working on someone else's token. The lease is the same either way (read on the
 // workspace database), so this costs only extra processes, which the idle shutdown bounds.
+//
+// Write sidecars (ADR 0117, docs/decisions/0008) are the same machinery with a different identity
+// and lease: one per (API, granting owner), on a token with subject `apiwrite:<api-id>` and
+// roleCeiling editor minted for that owner, running `--access=tablewrite` with the API's
+// `scope.write` (booth-database's table-scoped write group). They are never shared with reads.
+// Each one is tagged with the version of the API's write settings it was started under; a request
+// under newer settings replaces it rather than letting it renew a stale scope, and turning writes
+// off or revoking an owner's last grant stops it at once (StopWrites).
 package sidecars
 
 import (
@@ -50,7 +58,7 @@ import (
 
 // Minter mints workload tokens (internal/workload.Minter).
 type Minter interface {
-	Mint(ctx context.Context, workspace, owner string) (workload.Token, error)
+	Mint(ctx context.Context, r workload.Request) (workload.Token, error)
 }
 
 // Config configures the manager. Zero durations take the defaults below.
@@ -108,10 +116,31 @@ func (c *Config) defaults() {
 	}
 }
 
-type key struct{ workspace, owner string }
+// key identifies a sidecar. api is "" for a read sidecar.
+type key struct{ workspace, owner, api string }
+
+func (k key) String() string {
+	if k.api == "" {
+		return "workspace " + k.workspace
+	}
+	return "API " + k.api + " (workspace " + k.workspace + ")"
+}
+
+// WriteSpec is one write sidecar's identity and lease (ADR 0117).
+type WriteSpec struct {
+	Workspace string
+	APIID     string
+	// Owner is the granting owner the token is minted for.
+	Owner string
+	// Scope is the broker scope: {"workspace", "write": {"grant", "tables"}}.
+	Scope json.RawMessage
+	// Version is the API's write-settings version Scope was built from.
+	Version int64
+}
 
 type entry struct {
 	k        key
+	write    *WriteSpec
 	dir      string
 	ready    chan struct{}
 	err      error
@@ -156,7 +185,58 @@ var _ source.Pools = (*Manager)(nil)
 // Pool returns a pool on workspace's database under owner's workload identity, starting a sidecar
 // if none is running for that pair.
 func (m *Manager) Pool(ctx context.Context, workspace, owner string) (*pgxpool.Pool, error) {
-	k := key{workspace, owner}
+	return m.pool(ctx, key{workspace: workspace, owner: owner}, nil)
+}
+
+// WritePool returns a pool on the API's table-scoped write lease under the granting owner's
+// identity, starting a write sidecar if none is running for that (API, owner) under this settings
+// version. A sidecar started under another version is stopped first.
+func (m *Manager) WritePool(ctx context.Context, w WriteSpec) (*pgxpool.Pool, error) {
+	k := key{workspace: w.Workspace, owner: w.Owner, api: w.APIID}
+	m.mu.Lock()
+	if e := m.entries[k]; e != nil && e.write.Version != w.Version {
+		delete(m.entries, k)
+		m.mu.Unlock()
+		go func() { <-e.ready; m.stop(e, "write settings changed") }()
+	} else {
+		m.mu.Unlock()
+	}
+	return m.pool(ctx, k, &w)
+}
+
+// StopWrites stops the API's write sidecars: every owner's when owner is "", else that owner's.
+// It returns how many it stopped. The next write starts a new one, if still allowed.
+func (m *Manager) StopWrites(apiID, owner, why string) int {
+	m.mu.Lock()
+	var stop []*entry
+	for k, e := range m.entries {
+		if k.api == apiID && (owner == "" || k.owner == owner) {
+			delete(m.entries, k)
+			stop = append(stop, e)
+		}
+	}
+	m.mu.Unlock()
+	for _, e := range stop {
+		<-e.ready
+		m.stop(e, why)
+	}
+	return len(stop)
+}
+
+// RunningWrites reports how many write sidecars are up for the API (for tests and logs).
+func (m *Manager) RunningWrites(apiID string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for k := range m.entries {
+		if k.api == apiID {
+			n++
+		}
+	}
+	return n
+}
+
+func (m *Manager) pool(ctx context.Context, k key, w *WriteSpec) (*pgxpool.Pool, error) {
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -171,7 +251,7 @@ func (m *Manager) Pool(ctx context.Context, workspace, owner string) (*pgxpool.P
 	}
 	e := m.entries[k]
 	if e == nil {
-		e = &entry{k: k, ready: make(chan struct{}), dir: filepath.Join(m.cfg.Dir, dirName(k))}
+		e = &entry{k: k, write: w, ready: make(chan struct{}), dir: filepath.Join(m.cfg.Dir, dirName(k, w))}
 		e.lastUsed.Store(m.now().UnixNano())
 		m.entries[k] = e
 		go m.start(e)
@@ -214,9 +294,23 @@ func (m *Manager) Close() {
 	}
 }
 
-func dirName(k key) string {
-	sum := sha256.Sum256([]byte(k.workspace + "\x00" + k.owner))
+// dirName is unique per sidecar. A write sidecar's includes its settings version, so a
+// replacement never shares a directory with the one being stopped.
+func dirName(k key, w *WriteSpec) string {
+	id := k.workspace + "\x00" + k.owner
+	if w != nil {
+		id = fmt.Sprintf("w\x00%s\x00%s\x00%d", k.api, k.owner, w.Version) // never a read sidecar's directory
+	}
+	sum := sha256.Sum256([]byte(id))
 	return hex.EncodeToString(sum[:8])
+}
+
+// mintRequest is the token an entry's sidecar runs on.
+func (e *entry) mintRequest() workload.Request {
+	if e.write != nil {
+		return workload.WriteRequest(e.k.workspace, e.write.APIID, e.k.owner)
+	}
+	return workload.ReadRequest(e.k.workspace, e.k.owner)
 }
 
 func (m *Manager) start(e *entry) {
@@ -231,7 +325,7 @@ func (m *Manager) start(e *entry) {
 			m.refused[e.k] = m.now().Add(m.cfg.RefusalTTL)
 			m.mu.Unlock()
 		} else {
-			log.Printf("sidecars: starting for workspace %s: %v", e.k.workspace, err)
+			log.Printf("sidecars: starting for %s: %v", e.k, err)
 		}
 		e.err = err
 		m.forget(e)
@@ -244,7 +338,7 @@ func (m *Manager) start(e *entry) {
 		fail(err)
 		return
 	}
-	tok, err := m.minter.Mint(startCtx, e.k.workspace, e.k.owner)
+	tok, err := m.minter.Mint(startCtx, e.mintRequest())
 	if err != nil {
 		fail(err)
 		return
@@ -254,10 +348,15 @@ func (m *Manager) start(e *entry) {
 		return
 	}
 
-	scope, _ := json.Marshal(map[string]string{"workspace": e.k.workspace})
+	access, scope := "read", []byte(nil)
+	if e.write != nil {
+		access, scope = "tablewrite", e.write.Scope
+	} else {
+		scope, _ = json.Marshal(map[string]string{"workspace": e.k.workspace})
+	}
 	cmd := exec.Command(m.cfg.Binary,
 		"--kind=postgres",
-		"--access=read",
+		"--access="+access,
 		"--scope="+string(scope),
 		"--workspace="+e.k.workspace,
 		"--token-file="+filepath.Join(e.dir, "token"),
@@ -265,7 +364,11 @@ func (m *Manager) start(e *entry) {
 		"--core-url="+m.cfg.CoreURL,
 	)
 	cmd.Env = append([]string{}, m.cfg.ExtraEnv...)
-	logs := logWriter("sidecar[" + e.k.workspace + "]")
+	prefix := "sidecar[" + e.k.workspace + "]"
+	if e.write != nil {
+		prefix = "sidecar[" + e.k.workspace + " write " + e.k.api + "]"
+	}
+	logs := logWriter(prefix)
 	cmd.Stdout, cmd.Stderr = logs, logs
 	if err := cmd.Start(); err != nil {
 		fail(fmt.Errorf("starting the credential sidecar: %w", err))
@@ -278,7 +381,7 @@ func (m *Manager) start(e *entry) {
 		_ = logs.Close()
 		close(e.exited)
 		if !e.stopping.Load() {
-			log.Printf("sidecars: the sidecar for workspace %s exited unexpectedly; the next request starts a new one", e.k.workspace)
+			log.Printf("sidecars: the sidecar for %s exited unexpectedly; the next request starts a new one", e.k)
 			m.forget(e)
 			m.stop(e, "exited")
 		}
@@ -311,7 +414,11 @@ func (m *Manager) start(e *entry) {
 	}
 	e.pool = pool
 	close(e.ready)
-	log.Printf("sidecars: started for workspace %s (owner %s)", e.k.workspace, e.k.owner)
+	if e.write != nil {
+		log.Printf("sidecars: started write sidecar for API %s in workspace %s (granting owner %s, settings v%d)", e.k.api, e.k.workspace, e.k.owner, e.write.Version)
+	} else {
+		log.Printf("sidecars: started for workspace %s (owner %s)", e.k.workspace, e.k.owner)
+	}
 	go m.refresh(ctx, e, m.now(), tok.ExpiresAt)
 }
 
@@ -326,10 +433,10 @@ func (m *Manager) refresh(ctx context.Context, e *entry, issued, expires time.Ti
 		case <-time.After(time.Until(due)):
 		}
 		for {
-			tok, err := m.minter.Mint(ctx, e.k.workspace, e.k.owner)
+			tok, err := m.minter.Mint(ctx, e.mintRequest())
 			if err == nil {
 				if err := writeToken(e.dir, tok.JWT); err != nil {
-					log.Printf("sidecars: writing the renewed token for workspace %s: %v", e.k.workspace, err)
+					log.Printf("sidecars: writing the renewed token for %s: %v", e.k, err)
 				}
 				issued, expires = m.now(), tok.ExpiresAt
 				break
@@ -346,7 +453,7 @@ func (m *Manager) refresh(ctx context.Context, e *entry, issued, expires time.Ti
 				return
 			}
 			if !m.now().Before(expires) {
-				log.Printf("sidecars: couldn't renew the token for workspace %s before it expired: %v", e.k.workspace, err)
+				log.Printf("sidecars: couldn't renew the token for %s before it expired: %v", e.k, err)
 				m.forget(e)
 				m.stop(e, "token expired")
 				return
@@ -424,7 +531,11 @@ func (m *Manager) stop(e *entry, why string) {
 		}
 		_ = os.RemoveAll(e.dir)
 		if why != "start failed" {
-			log.Printf("sidecars: stopped for workspace %s (%s)", e.k.workspace, why)
+			if e.write != nil {
+				log.Printf("sidecars: stopped write sidecar for API %s in workspace %s (%s)", e.k.api, e.k.workspace, why)
+			} else {
+				log.Printf("sidecars: stopped for workspace %s (%s)", e.k.workspace, why)
+			}
 		}
 	})
 }

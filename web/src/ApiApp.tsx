@@ -2,20 +2,25 @@ import { useMemo, useState, type FormEvent, type ReactNode } from "react";
 import {
   ApiError,
   deleteApi,
+  disableWrites,
   generateApi,
+  getWrites,
   getOpenAPI,
   getSchema,
   issueKey,
   listApis,
+  listGrants,
   listKeys,
   listPostgresDatasets,
   regenerateApi,
+  revokeGrant,
   revokeKey,
+  saveWrites,
   type ApiContext,
   type GetAccessToken,
 } from "./api/client";
 import { useLoad, type LoadState } from "./hooks";
-import type { ApiDefinition, ApiKey, IssuedKey, Mismatch, WorkspaceRole } from "./types";
+import type { ApiDefinition, ApiKey, IssuedKey, Mismatch, WorkspaceRole, WriteOperation, WritesView } from "./types";
 
 /**
  * Props contract pinned by ADR 0031 (workspace/role/theme) and ADR 0033 (getAccessToken): plain
@@ -40,6 +45,7 @@ export interface ApiAppProps {
 export function ApiApp({ workspace, role, theme, getAccessToken }: ApiAppProps) {
   const api = useMemo<ApiContext>(() => ({ workspace, getAccessToken }), [workspace, getAccessToken]);
   const canWrite = role === "owner" || role === "editor";
+  const isOwner = role === "owner";
   const apis = useLoad(() => listApis(api), [api]);
 
   return (
@@ -47,12 +53,12 @@ export function ApiApp({ workspace, role, theme, getAccessToken }: ApiAppProps) 
       <header>
         <h1 className="text-xl font-semibold">API</h1>
         <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-          Read-only REST and GraphQL APIs over catalog datasets, reached with API keys issued here.
+          REST and GraphQL APIs over catalog datasets, read with API keys issued here. Owners can let apps write to them.
         </p>
       </header>
 
 
-      <ApisSection api={api} state={apis.state} reload={apis.reload} canWrite={canWrite} />
+      <ApisSection api={api} state={apis.state} reload={apis.reload} canWrite={canWrite} isOwner={isOwner} />
       {canWrite && apis.state.status === "ready" && <KeysSection api={api} apis={apis.state.data} />}
     </div>
   );
@@ -60,7 +66,19 @@ export function ApiApp({ workspace, role, theme, getAccessToken }: ApiAppProps) 
 
 // ---- APIs ---------------------------------------------------------------------------------------
 
-function ApisSection({ api, state, reload, canWrite }: { api: ApiContext; state: LoadState<ApiDefinition[]>; reload: () => void; canWrite: boolean }) {
+function ApisSection({
+  api,
+  state,
+  reload,
+  canWrite,
+  isOwner,
+}: {
+  api: ApiContext;
+  state: LoadState<ApiDefinition[]>;
+  reload: () => void;
+  canWrite: boolean;
+  isOwner: boolean;
+}) {
   return (
     <section aria-labelledby="apis-heading" className="flex flex-col gap-3">
       <h2 id="apis-heading" className="text-base font-semibold">
@@ -75,7 +93,7 @@ function ApisSection({ api, state, reload, canWrite }: { api: ApiContext; state:
         ) : (
           <div className="flex flex-col gap-3">
             {state.data.map((d) => (
-              <ApiCard key={d.id} api={api} def={d} canWrite={canWrite} onChange={reload} />
+              <ApiCard key={d.id} api={api} def={d} canWrite={canWrite} isOwner={isOwner} onChange={reload} />
             ))}
           </div>
         ))}
@@ -141,7 +159,7 @@ function GenerateForm({ api, existing, onDone }: { api: ApiContext; existing: Ap
   );
 }
 
-function ApiCard({ api, def, canWrite, onChange }: { api: ApiContext; def: ApiDefinition; canWrite: boolean; onChange: () => void }) {
+function ApiCard({ api, def, canWrite, isOwner, onChange }: { api: ApiContext; def: ApiDefinition; canWrite: boolean; isOwner: boolean; onChange: () => void }) {
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState<{ message: string; mismatches?: Mismatch[] } | null>(null);
@@ -164,7 +182,14 @@ function ApiCard({ api, def, canWrite, onChange }: { api: ApiContext; def: ApiDe
     <Panel>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <p className="font-medium">{def.datasetName}</p>
+          <p className="font-medium">
+            {def.datasetName}
+            {def.writes && (
+              <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-900 dark:bg-amber-900 dark:text-amber-100">
+                Writable by apps
+              </span>
+            )}
+          </p>
           <p className="mt-0.5 font-mono text-xs text-slate-500 dark:text-slate-400">
             /{def.slug} · {def.table.schema}.{def.table.name}
           </p>
@@ -220,8 +245,236 @@ function ApiCard({ api, def, canWrite, onChange }: { api: ApiContext; def: ApiDe
       </p>
       <Endpoints slug={def.slug} />
       <SchemaToggle api={api} id={def.id} generatedAt={def.generatedAt} />
+      <WritesToggle api={api} def={def} isOwner={isOwner} onChange={onChange} />
       {error && <ErrorBanner message={error.message} mismatches={error.mismatches} />}
     </Panel>
+  );
+}
+
+// ---- writes (ADR 0117) --------------------------------------------------------------------------
+
+const OPERATIONS: { op: WriteOperation; label: string }[] = [
+  { op: "insert", label: "Add rows" },
+  { op: "update", label: "Change rows" },
+  { op: "delete", label: "Delete rows" },
+];
+
+function WritesToggle({ api, def, isOwner, onChange }: { api: ApiContext; def: ApiDefinition; isOwner: boolean; onChange: () => void }) {
+  const [open, setOpen] = useState(false);
+  if (!isOwner && !def.writes) return null;
+  return (
+    <div className="mt-2">
+      <button
+        type="button"
+        className="text-xs font-medium text-indigo-700 hover:underline dark:text-indigo-400"
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+      >
+        {open ? "Hide writes" : def.writes ? "Writes" : "Let apps write…"}
+      </button>
+      {/* the settings version in the key reloads after a save elsewhere */}
+      {open && <WritesPanel key={`${def.generatedAt}@${def.writes?.version ?? 0}`} api={api} def={def} isOwner={isOwner} onChange={onChange} />}
+    </div>
+  );
+}
+
+function WritesPanel({ api, def, isOwner, onChange }: { api: ApiContext; def: ApiDefinition; isOwner: boolean; onChange: () => void }) {
+  const view = useLoad(() => getWrites(api, def.id), [api, def.id]);
+  if (view.state.status === "loading") return <Muted>Loading write settings…</Muted>;
+  if (view.state.status === "error") return <ErrorBanner message={view.state.error} />;
+  const v = view.state.data;
+  return (
+    <div className="mt-2 flex flex-col gap-3 rounded border border-slate-200 p-3 dark:border-slate-800">
+      {isOwner ? (
+        <WritesForm api={api} def={def} view={v} onSaved={onChange} />
+      ) : (
+        <p className="text-sm">
+          Apps an owner grants can {describe(v.writes?.operations ?? [])} in{" "}
+          <span className="font-mono">
+            {def.table.schema}.{def.table.name}
+          </span>
+          , columns {(v.writes?.columns ?? []).join(", ")}. Only workspace owners change this.
+        </p>
+      )}
+      {isOwner && v.writes && <GrantsList api={api} apiId={def.id} />}
+    </div>
+  );
+}
+
+function describe(ops: WriteOperation[]): string {
+  const words = ops.map((o) => ({ insert: "add rows", update: "change rows", delete: "delete rows" })[o]);
+  return words.length === 0 ? "write nothing" : words.join(", ").replace(/, ([^,]*)$/, " and $1");
+}
+
+function WritesForm({ api, def, view, onSaved }: { api: ApiContext; def: ApiDefinition; view: WritesView; onSaved: () => void }) {
+  const [ops, setOps] = useState<Set<WriteOperation>>(new Set(view.writes?.operations ?? ["insert"]));
+  const [cols, setCols] = useState<Set<string>>(new Set(view.writes?.columns ?? view.columns.filter((c) => c.required && c.writable).map((c) => c.column)));
+  const [confirmed, setConfirmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<{ message: string; problems?: { field: string; problem: string }[] } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  if (view.needsRegenerate) return <Muted>This API was generated before writes existed. Regenerate it, then turn writes on.</Muted>;
+  if (!view.dataAccess) return <Muted>Writes need booth-api&apos;s data access (core.url), which isn&apos;t configured.</Muted>;
+
+  const writesValues = ops.has("insert") || ops.has("update");
+  const flip = <T,>(set: Set<T>, item: T) => {
+    const next = new Set(set);
+    if (next.has(item)) next.delete(item);
+    else next.add(item);
+    setConfirmed(false);
+    return next;
+  };
+  const chosenCols = writesValues ? view.columns.filter((c) => cols.has(c.column)).map((c) => c.column) : [];
+  const chosenOps = OPERATIONS.map((o) => o.op).filter((o) => ops.has(o));
+
+  async function run(fn: () => Promise<unknown>, done?: string) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await fn();
+      if (done) setNotice(done);
+      onSaved();
+    } catch (err) {
+      setError(err instanceof ApiError ? { message: err.message, problems: err.problems } : { message: String(err) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form
+      className="flex flex-col gap-3 text-sm"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void run(() => saveWrites(api, def.id, chosenOps, chosenCols));
+      }}
+    >
+      <div className="flex flex-col gap-1 rounded bg-slate-50 p-2 text-slate-700 dark:bg-slate-950 dark:text-slate-300">
+        <p className="font-medium">What these settings mean</p>
+        {view.writes ? (
+          <p>
+            Writes are on. Apps you grant can {describe(view.writes.operations)} in{" "}
+            <span className="font-mono">
+              {def.table.schema}.{def.table.name}
+            </span>
+            {view.writes.columns.length > 0 ? `, and can set only these columns: ${view.writes.columns.join(", ")}` : ""}.
+          </p>
+        ) : (
+          <p>
+            Writes are off: no app can change{" "}
+            <span className="font-mono">
+              {def.table.schema}.{def.table.name}
+            </span>{" "}
+            through this API.
+          </p>
+        )}
+        <p>
+          Turning writes on doesn&apos;t let any app write by itself. Each app also needs a grant, made from that app&apos;s settings page in Streamlit
+          (Write targets). Anyone who can open a granted app can then write through it, viewers included. Only workspace owners can change these
+          settings or grant apps.
+        </p>
+      </div>
+      <fieldset className="flex flex-wrap gap-4">
+        <legend className="mb-1 font-medium">What apps may do</legend>
+        {OPERATIONS.map(({ op, label }) => (
+          <label key={op} className="flex items-center gap-2">
+            <input type="checkbox" checked={ops.has(op)} disabled={op !== "insert" && !view.hasPrimaryKey} onChange={() => setOps(flip(ops, op))} />
+            {label}
+          </label>
+        ))}
+      </fieldset>
+      {writesValues && (
+        <fieldset className="flex flex-col gap-1">
+          <legend className="mb-1 font-medium">Columns apps may set</legend>
+          {view.columns.map((c) => (
+            <label key={c.column} className="flex items-center gap-2">
+              <input type="checkbox" checked={cols.has(c.column)} disabled={!c.writable} onChange={() => setCols(flip(cols, c.column))} />
+              <span className="font-mono text-xs">{c.column}</span>
+              <span className="text-xs text-slate-500 dark:text-slate-400">
+                {c.type}
+                {c.required ? " · required to add a row" : ""}
+                {c.reason ? ` · ${c.reason}` : ""}
+              </span>
+            </label>
+          ))}
+        </fieldset>
+      )}
+      <label className="flex items-start gap-2 rounded bg-amber-50 p-2 text-amber-900 dark:bg-amber-950 dark:text-amber-100">
+        <input type="checkbox" checked={confirmed} onChange={() => setConfirmed(!confirmed)} />
+        <span>
+          Apps I grant can {describe(chosenOps)} in{" "}
+          <span className="font-mono">
+            {def.table.schema}.{def.table.name}
+          </span>
+          {writesValues ? `, setting ${chosenCols.length === 0 ? "no columns" : chosenCols.join(", ")}` : ""}. Anyone who can open such an app can use
+          it to write.
+        </span>
+      </label>
+      <div className="flex gap-2">
+        <Button type="submit" primary disabled={busy || !confirmed || chosenOps.length === 0}>
+          {view.writes ? "Save" : "Turn writes on"}
+        </Button>
+        {view.writes && (
+          <Button danger disabled={busy} onClick={() => void run(() => disableWrites(api, def.id), "Writes are off, and every grant was revoked.")}>
+            Turn writes off
+          </Button>
+        )}
+      </div>
+      {notice && <p className="text-xs text-emerald-700 dark:text-emerald-400">{notice}</p>}
+      {error && (
+        <div role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
+          {error.message}
+          {error.problems && (
+            <ul className="mt-1 list-disc pl-5">
+              {error.problems.map((p) => (
+                <li key={p.field}>
+                  <span className="font-mono">{p.field}</span>: {p.problem}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </form>
+  );
+}
+
+function GrantsList({ api, apiId }: { api: ApiContext; apiId: string }) {
+  const grants = useLoad(() => listGrants(api, apiId), [api, apiId]);
+  const [error, setError] = useState<string | null>(null);
+  if (grants.state.status === "loading") return <Muted>Loading grants…</Muted>;
+  if (grants.state.status === "error") return <ErrorBanner message={grants.state.error} />;
+  return (
+    <div className="flex flex-col gap-1 text-sm">
+      <p className="font-medium">Apps that may write</p>
+      {grants.state.data.length === 0 ? (
+        <Muted>None yet. Grant an app from its settings in Streamlit (Write targets).</Muted>
+      ) : (
+        <ul className="flex flex-col gap-1">
+          {grants.state.data.map((g) => (
+            <li key={g.id} className="flex flex-wrap items-center justify-between gap-2">
+              <span>
+                <span className="font-mono text-xs">{g.principal}</span>{" "}
+                <span className="text-xs text-slate-500 dark:text-slate-400">
+                  {describe(g.operations)}, granted by {g.grantedByName}
+                </span>
+              </span>
+              <Button
+                onClick={() => {
+                  setError(null);
+                  revokeGrant(api, g.id).then(grants.reload, (err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+                }}
+              >
+                Revoke
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {error && <ErrorBanner message={error} />}
+    </div>
   );
 }
 
@@ -391,10 +644,13 @@ function IssueForm({ api, apis, onIssued }: { api: ApiContext; apis: ApiDefiniti
             </label>
           ))}
         </fieldset>
-        <div>
+        <div className="flex flex-wrap items-center gap-3">
           <Button type="submit" primary disabled={busy || name.trim() === "" || scope.size === 0}>
             {busy ? "Creating…" : "Create key"}
           </Button>
+          {(name.trim() === "" || scope.size === 0) && (
+            <span className="text-xs text-slate-500 dark:text-slate-400">Enter a name and tick at least one dataset</span>
+          )}
         </div>
         {error && <ErrorBanner message={error} />}
       </form>

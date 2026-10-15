@@ -25,7 +25,10 @@ it's running is in the README ("Using a generated API").
 | `oidc.issuerUrl`, `oidc.clientId` | The same identity provider and client booth-core uses (e.g. Keycloak's realm URL and `booth-design`) | The management API (the API page in Booth) answers 503. |
 | `oidc.groupsClaim` | Only if booth-core's isn't `groups` | Roles aren't recognised; everyone gets 403 on the management API. |
 | `oidc.jwksUrl` | Optional (ADR 0108): where to fetch the identity provider's signing keys instead of using discovery, e.g. `http://keycloak.keycloak.svc:8080/realms/booth/protocol/openid-connect/certs` | Discovery from `oidc.issuerUrl`, as before. |
-| `dataAccess.idle` | How long an unused sidecar keeps running (default `10m`) | Defaults apply. |
+| `dataAccess.idle` | How long an unused sidecar keeps running (default `10m`), read or write | Defaults apply. |
+| `oidc.workloadIssuerUrl` | booth-core's workload issuer, its in-cluster URL (the same value as core's `workloadIdentity.issuerUrl`, e.g. `http://booth-core.booth-system.svc:8080`). Core's install API fills it (identity keys). | App writes (`/modules/api/app/v1/...`, ADR 0117) answer 503. Reads and keys are unaffected. |
+| `writes.ratePerSecond`, `writes.burst` | Per-app write rate limit, per pod (default 10/s, burst 50) | Defaults apply. |
+| `writes.auditRetention` | How long the write audit log is kept (default `2160h`, 90 days) | Defaults apply. |
 
 **`oidc.jwksUrl` (ADR 0108).** When set, booth-api fetches the provider's signing keys directly from
 this URL and never contacts the issuer's discovery document. Tokens are still accepted only if their
@@ -48,6 +51,39 @@ helm upgrade --install booth-api charts/booth-api -n booth-api --create-namespac
   --set core.url=http://booth-core.booth-system.svc:8080 \
   --set oidc.issuerUrl=https://keycloak.example/realms/booth --set oidc.clientId=booth-design
 ```
+
+## App writes (ADR 0117)
+
+**Who controls what:**
+- Workspace owners turn writes on per API (**API** page, or `PUT /api/apis/{id}/writes`) and
+  grant apps (`docs/contracts/app-writes.md`). booth-streamlit's "Write targets" panel makes the
+  grants.
+
+**The write sidecars:**
+- Each write runs on a write sidecar: one per (API, granting owner), with token subject
+  `apiwrite:<api-id>`, minted for the granting owner at editor.
+- Its lease is booth-database's per-grant write group (`tablewrite`). It is never shared with reads.
+- In the log they show as `sidecars: started write sidecar for API <id> …` and
+  `sidecars: stopped write sidecar for API <id> … (<why>)`. `<why>` is one of: `idle`, `grant
+  revoked`, `write settings saved`, `write settings changed`, `writes turned off`, `reissued after
+  42501`.
+
+**Logs and the audit trail:**
+- Every write logs one line: `writes: <op> api=… workspace=… principal=… grantedBy=… status=…
+  outcome=…`.
+- Row values are never logged, nor stored in the audit log (`write_log`, kept for
+  `writes.auditRetention`).
+- Changes to settings and grants are in `write_admin_log`, with who made them.
+
+**When an app's writes stop with `granting_owner_no_access`:**
+- The owner who granted them has lost the editor or owner role, or hasn't signed in for 7 days.
+- Either that owner signs in, or another owner grants again.
+
+**Upgrading from a release without writes:**
+- Migration 0003 runs at start.
+- Existing APIs keep working.
+- Each API must be regenerated once before writes can be turned on, because its snapshot predates
+  the column flags writes need.
 
 ## The sidecar processes
 

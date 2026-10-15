@@ -1,7 +1,12 @@
 # Registers booth-api with booth-core's module registry (ADR 0019, contracts/module-manifest.md).
 #
 # One native view under Manage (ADR 0017, contracts/ui-integration.md): pick a catalog dataset,
-# generate its API, issue and revoke keys. UI package: @projectbooth/api-ui (web/).
+# generate its API, issue and revoke keys, and (owners) turn writes on (ADR 0117). UI package:
+# @projectbooth/api-ui (web/).
+#
+# App writes (ADR 0117) need no manifest field: an app's Streamlit gate reaches
+# /modules/api/app/v1/... through core's ordinary gateway with the app's own workload token, and
+# booth-api verifies that token against core's workload issuer (oidc.workloadIssuerUrl).
 #
 # navPath is /apis, not /api: the shell and booth-core share an origin, and /api/* is core's own
 # API (contracts/core-platform-api.md), so a shell route of /api would collide with it.
@@ -39,6 +44,9 @@ spec:
   # apikeys:<workspace>, roleCeiling viewer) for the credential sidecar that reads the workspace's
   # database. Core refuses a mint unless the creator holds a current role in that workspace. Only
   # declared with core.url, since the sidecar calls core's broker.
+  # ADR 0117: also one per API and granting owner (subject apiwrite:<api-id>, roleCeiling editor)
+  # for the write sidecar's table-scoped `tablewrite` lease. Core reserves the apiwrite: subject
+  # kind to this module's id (booth-core v0.3.5).
   workloadIdentity:
     mint: true
   {{- end }}

@@ -85,7 +85,7 @@ echo "--- migrations applied in the module's own database (readiness waits for t
 tables=$(kubectl -n "$NS" exec pg -- psql -U booth_mod_api -d booth_mod_api -AtXc \
   "select string_agg(table_name, ',' order by table_name) from information_schema.tables where table_schema = 'public'")
 echo "$tables"
-[ "$tables" = "api_key_datasets,api_keys,api_schema_migrations,apis" ] || { echo "unexpected tables: $tables"; exit 1; }
+[ "$tables" = "api_key_datasets,api_keys,api_schema_migrations,api_writes,apis,write_admin_log,write_grants,write_idempotency,write_log" ] || { echo "unexpected tables: $tables"; exit 1; }
 
 echo "--- with no OIDC configured, the management API refuses (503) rather than letting anyone in:"
 kubectl -n "$NS" port-forward deploy/a-booth-api 18080:8080 >/dev/null 2>&1 &

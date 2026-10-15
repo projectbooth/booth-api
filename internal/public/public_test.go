@@ -301,7 +301,7 @@ func TestRegenerationIsPickedUp(t *testing.T) {
 	d := e.defs["orders"]
 	d.Columns = append(d.Columns, apidef.Column{Name: "note", Type: "text", Nullable: true})
 	time.Sleep(10 * time.Millisecond) // generated_at is now(); make sure it moves
-	if _, err := e.st.UpdateSnapshot(ctx, d); err != nil {
+	if _, err := e.st.UpdateSnapshot(ctx, d, nil); err != nil {
 		t.Fatal(err)
 	}
 	if r := e.do("GET", "/v1/orders/rows?fields=note&limit=1", k, ""); r.code != 200 || !strings.Contains(r.body, `"note":"n"`) {

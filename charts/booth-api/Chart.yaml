@@ -1,8 +1,8 @@
 apiVersion: v2
 name: booth-api
 description: >
-  Project Booth's API module: generated, read-only REST and GraphQL APIs over catalog datasets,
-  authenticated by API keys this module issues (ADR 0100).
+  Project Booth's API module: generated REST and GraphQL APIs over catalog datasets, read with API
+  keys this module issues (ADR 0100), and written by apps an owner grants (ADR 0117).
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
@@ -13,8 +13,8 @@ home: https://github.com/projectbooth/booth-api
 # so an install through the install API (the Module Store's Install button included) is configured
 # without hand-typed values. Core fills a mapped path only when the request doesn't set that leaf.
 # coreUrl (amendment 1) fills core.url, which turns on generating APIs and reading workspace data.
-# Omitted on purpose: workloadIssuerUrl (booth-api mints workload tokens for its sidecars but never
-# verifies one, so it has no workload-issuer setting) and iframeIssuerUrl (no iframe-proxied UI).
+# workloadIssuerUrl fills oidc.workloadIssuerUrl: app write tokens (ADR 0117) are verified against
+# core's workload issuer. Omitted on purpose: iframeIssuerUrl (no iframe-proxied UI).
 annotations:
   booth.projectbooth.io/identity-keys: |
-    {"issuerUrl":"oidc.issuerUrl","clientId":"oidc.clientId","jwksUrl":"oidc.jwksUrl","groupsClaim":"oidc.groupsClaim","coreUrl":"core.url"}
+    {"issuerUrl":"oidc.issuerUrl","clientId":"oidc.clientId","jwksUrl":"oidc.jwksUrl","groupsClaim":"oidc.groupsClaim","coreUrl":"core.url","workloadIssuerUrl":"oidc.workloadIssuerUrl"}

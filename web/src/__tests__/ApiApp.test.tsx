@@ -172,6 +172,19 @@ describe("ApiApp", () => {
     expect(screen.queryByText("Never")).not.toBeInTheDocument();
   });
 
+  it("says why Create key is disabled until there is a name and a dataset", async () => {
+    mockFetch(base);
+    const user = userEvent.setup();
+    render(<ApiApp workspace="acme" role="editor" theme="light" getAccessToken={() => "tok"} />);
+    const create = await screen.findByRole("button", { name: "Create key" });
+    expect(create).toBeDisabled();
+    expect(screen.getByText("Enter a name and tick at least one dataset")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("New key name"), "export");
+    await user.click(screen.getByRole("checkbox", { name: "Orders" }));
+    expect(create).toBeEnabled();
+    expect(screen.queryByText("Enter a name and tick at least one dataset")).not.toBeInTheDocument();
+  });
+
   it("revokes a key only after confirming", async () => {
     let revoked = false;
     const calls = mockFetch({
@@ -189,5 +202,91 @@ describe("ApiApp", () => {
     await user.click(screen.getByRole("button", { name: "Confirm revoke" }));
     expect(await screen.findByText(/^Revoked/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument();
+  });
+
+  describe("writes (ADR 0117)", () => {
+    const view = (writes: unknown) => ({
+      status: 200,
+      body: {
+        apiId: "api-1",
+        writes,
+        hasPrimaryKey: true,
+        needsRegenerate: false,
+        dataAccess: true,
+        columns: [
+          { column: "id", field: "id", type: "bigint", writable: false, reason: "a primary-key column the database fills in", required: false },
+          { column: "amount", field: "amount", type: "numeric(12,2)", writable: true, required: true },
+        ],
+      },
+    });
+    const on = { operations: ["insert"], columns: ["amount"], version: 1, updatedBy: "alice", updatedAt: "2026-10-15T00:00:00Z" };
+
+    it("lets an owner turn writes on only after confirming in plain words", async () => {
+      const calls = mockFetch({
+        ...base,
+        "GET /modules/api/api/apis/api-1/writes": () => view(null),
+        "PUT /modules/api/api/apis/api-1/writes": () => view(on),
+      });
+      const user = userEvent.setup();
+      render(<ApiApp workspace="acme" role="owner" theme="light" getAccessToken={() => "tok"} />);
+      await user.click(await screen.findByRole("button", { name: "Let apps write…" }));
+      expect(await screen.findByLabelText("Add rows")).toBeChecked();
+      expect(screen.getByText(/Writes are off: no app can change/)).toBeInTheDocument();
+      expect(screen.getByText(/Each app also needs a grant, made from that app's settings page in Streamlit/)).toBeInTheDocument();
+      expect(screen.getByText(/a primary-key column the database fills in/)).toBeInTheDocument();
+      const save = screen.getByRole("button", { name: "Turn writes on" });
+      expect(save).toBeDisabled();
+      await user.click(screen.getByText(/Apps I grant can add rows in/));
+      await user.click(save);
+      await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
+      expect(calls.find((c) => c.method === "PUT")?.body).toEqual({ operations: ["insert"], columns: ["amount"] });
+    });
+
+    it("never offers writes to an editor, and shows a viewer what a writable API allows", async () => {
+      mockFetch(base);
+      const { unmount } = render(<ApiApp workspace="acme" role="editor" theme="light" getAccessToken={() => "tok"} />);
+      await screen.findByText("/orders · public.orders");
+      expect(screen.queryByRole("button", { name: "Let apps write…" })).not.toBeInTheDocument();
+      unmount();
+      mockFetch({
+        ...base,
+        "GET /modules/api/api/apis": () => ({ status: 200, body: { items: [{ ...orders, writes: on }] } }),
+        "GET /modules/api/api/apis/api-1/writes": () => view(on),
+      });
+      const user = userEvent.setup();
+      render(<ApiApp workspace="acme" role="viewer" theme="light" getAccessToken={() => "tok"} />);
+      expect(await screen.findByText("Writable by apps")).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Writes" }));
+      expect(await screen.findByText(/Only workspace owners change this/)).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Turn writes off" })).not.toBeInTheDocument();
+    });
+
+    it("lets an owner revoke an app's grant and turn writes off", async () => {
+      const grant = {
+        id: "g1", apiId: "api-1", principal: "streamlit:acme:budget", operations: ["insert"], columns: null,
+        grantedBy: "alice", grantedByName: "Alice", createdAt: "2026-10-15T00:00:00Z", revokedAt: null,
+      };
+      let revoked = false;
+      const calls = mockFetch({
+        ...base,
+        "GET /modules/api/api/apis": () => ({ status: 200, body: { items: [{ ...orders, writes: on }] } }),
+        "GET /modules/api/api/apis/api-1/writes": () => view(on),
+        "GET /modules/api/api/write-grants": () => ({ status: 200, body: { items: revoked ? [] : [grant] } }),
+        "POST /modules/api/api/write-grants/g1/revoke": () => {
+          revoked = true;
+          return { status: 200, body: { ...grant, revokedAt: "2026-10-15T01:00:00Z" } };
+        },
+        "DELETE /modules/api/api/apis/api-1/writes": () => ({ status: 200, body: { revokedGrants: 0, databaseRevoked: true } }),
+      });
+      const user = userEvent.setup();
+      render(<ApiApp workspace="acme" role="owner" theme="light" getAccessToken={() => "tok"} />);
+      await user.click(await screen.findByRole("button", { name: "Writes" }));
+      expect(await screen.findByText("streamlit:acme:budget")).toBeInTheDocument();
+      const grantRow = screen.getByText("streamlit:acme:budget").closest("li") as HTMLElement;
+      await user.click(within(grantRow).getByRole("button", { name: "Revoke" }));
+      expect(await screen.findByText(/None yet/)).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Turn writes off" }));
+      await waitFor(() => expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/writes"))).toBe(true));
+    });
   });
 });

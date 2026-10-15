@@ -87,22 +87,24 @@ func fakeSidecar() {
 }
 
 type fakeMinter struct {
-	mu    sync.Mutex
-	ttl   time.Duration
-	err   error
-	calls []string
-	n     int
+	mu       sync.Mutex
+	ttl      time.Duration
+	err      error
+	calls    []string
+	requests []workload.Request
+	n        int
 }
 
-func (f *fakeMinter) Mint(_ context.Context, ws, owner string) (workload.Token, error) {
+func (f *fakeMinter) Mint(_ context.Context, r workload.Request) (workload.Token, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, ws+"/"+owner)
+	f.calls = append(f.calls, r.Workspace+"/"+r.Owner)
+	f.requests = append(f.requests, r)
 	if f.err != nil {
 		return workload.Token{}, f.err
 	}
 	f.n++
-	return workload.Token{JWT: fmt.Sprintf("jwt-%s-%s-%d", ws, owner, f.n), ExpiresAt: time.Now().Add(f.ttl), Role: "viewer"}, nil
+	return workload.Token{JWT: fmt.Sprintf("jwt-%s-%s-%d", r.Workspace, r.Owner, f.n), ExpiresAt: time.Now().Add(f.ttl), Role: r.RoleCeiling}, nil
 }
 
 func (f *fakeMinter) set(err error) {
@@ -210,7 +212,7 @@ func TestStartsOneSidecarPerWorkspaceAndOwner(t *testing.T) {
 		t.Fatalf("started %d sidecars", len(recs))
 	}
 	r := recs[0]
-	dir := filepath.Join(h.dir, dirName(key{"acme", "alice"}))
+	dir := filepath.Join(h.dir, dirName(key{workspace: "acme", owner: "alice"}, nil))
 	want := map[string]any{
 		"kind": "postgres", "access": "read", "scope": `{"workspace":"acme"}`, "workspace": "acme",
 		"tokenFile": filepath.Join(dir, "token"), "listen": "unix://" + filepath.Join(dir, socketName), "coreURL": "http://core.test",
@@ -264,7 +266,7 @@ func TestRefreshAndLosingAccess(t *testing.T) {
 	h := newHarness(t, Config{RefusalTTL: time.Hour})
 	h.minter.ttl = 600 * time.Millisecond // re-minted every ~400ms
 	query(t, h, "acme", "alice")
-	tokenPath := filepath.Join(h.dir, dirName(key{"acme", "alice"}), "token")
+	tokenPath := filepath.Join(h.dir, dirName(key{workspace: "acme", owner: "alice"}, nil), "token")
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		b, _ := os.ReadFile(tokenPath)
@@ -321,7 +323,7 @@ func TestCrashedSidecarIsReplaced(t *testing.T) {
 	h := newHarness(t, Config{})
 	query(t, h, "acme", "alice")
 	h.m.mu.Lock()
-	e := h.m.entries[key{"acme", "alice"}]
+	e := h.m.entries[key{workspace: "acme", owner: "alice"}]
 	h.m.mu.Unlock()
 	_ = e.cmd.Process.Kill()
 	deadline := time.Now().Add(5 * time.Second)
@@ -358,5 +360,77 @@ func TestClose(t *testing.T) {
 	}
 	if _, err := h.m.Pool(context.Background(), "acme", "alice"); !errors.Is(err, source.ErrUnavailable) {
 		t.Errorf("after Close: %v", err)
+	}
+}
+
+// Write sidecars (ADR 0117): one per (API, granting owner), on an apiwrite:<api-id> token at
+// roleCeiling editor, running --access=tablewrite with the API's scope; never shared with reads;
+// replaced when the settings version changes; stopped by StopWrites.
+func TestWriteSidecars(t *testing.T) {
+	h := newHarness(t, Config{})
+	ctx := context.Background()
+	scope := json.RawMessage(`{"workspace":"acme","write":{"grant":"api:a1","tables":[{"schema":"s","name":"t","operations":["insert"],"columns":["c"]}]}}`)
+	spec := WriteSpec{Workspace: "acme", APIID: "a1", Owner: "alice", Scope: scope, Version: 1}
+	use := func(s WriteSpec) {
+		t.Helper()
+		pool, err := h.m.WritePool(ctx, s)
+		if err != nil {
+			t.Fatalf("WritePool: %v", err)
+		}
+		var one int
+		if err := pool.QueryRow(ctx, "SELECT 1").Scan(&one); err != nil {
+			t.Fatal(err)
+		}
+	}
+	use(spec)
+	use(spec)
+	query(t, h, "acme", "alice") // a read sidecar for the same owner is a separate process
+	if h.m.Running() != 2 || h.m.RunningWrites("a1") != 1 {
+		t.Fatalf("running = %d (writes %d), want a read and a write sidecar", h.m.Running(), h.m.RunningWrites("a1"))
+	}
+	recs := h.records(t)
+	w := recs[0]
+	if w["access"] != "tablewrite" || w["scope"] != string(scope) || w["workspace"] != "acme" {
+		t.Errorf("write sidecar flags = %v", w)
+	}
+	if r := recs[1]; r["access"] != "read" {
+		t.Errorf("read sidecar flags = %v", r)
+	}
+	h.minter.mu.Lock()
+	first := h.minter.requests[0]
+	h.minter.mu.Unlock()
+	if first.Subject != "apiwrite:a1" || first.RoleCeiling != "editor" || first.Owner != "alice" || first.Workspace != "acme" {
+		t.Errorf("write mint = %+v", first)
+	}
+
+	// New settings: the old sidecar is replaced, not renewed.
+	spec.Version = 2
+	use(spec)
+	if len(h.records(t)) != 3 || h.m.RunningWrites("a1") != 1 {
+		t.Errorf("after a settings change: %d started, %d running", len(h.records(t)), h.m.RunningWrites("a1"))
+	}
+	// Another granting owner gets their own.
+	use(WriteSpec{Workspace: "acme", APIID: "a1", Owner: "erin", Scope: scope, Version: 2})
+	if h.m.RunningWrites("a1") != 2 {
+		t.Errorf("two owners: %d running", h.m.RunningWrites("a1"))
+	}
+	if n := h.m.StopWrites("a1", "erin", "grant revoked"); n != 1 || h.m.RunningWrites("a1") != 1 {
+		t.Errorf("stop erin's: stopped %d, %d left", n, h.m.RunningWrites("a1"))
+	}
+	if n := h.m.StopWrites("a1", "", "writes turned off"); n != 1 || h.m.RunningWrites("a1") != 0 || h.m.Running() != 1 {
+		t.Errorf("stop all: stopped %d, running %d (the read sidecar must stay)", n, h.m.Running())
+	}
+}
+
+// A granting owner the minter refuses (or caps below editor) gets no write sidecar.
+func TestWriteSidecarOwnerRefused(t *testing.T) {
+	h := newHarness(t, Config{})
+	h.minter.set(source.ErrOwnerNoAccess)
+	_, err := h.m.WritePool(context.Background(), WriteSpec{Workspace: "acme", APIID: "a1", Owner: "alice", Scope: json.RawMessage(`{}`), Version: 1})
+	if !errors.Is(err, source.ErrOwnerNoAccess) {
+		t.Errorf("err = %v", err)
+	}
+	if len(h.records(t)) != 0 {
+		t.Error("a sidecar started without a token")
 	}
 }

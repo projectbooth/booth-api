@@ -73,6 +73,17 @@ spec:
             - name: BOOTH_OIDC_GROUPS_CLAIM
               value: {{ $.Values.oidc.groupsClaim | quote }}
             {{- end }}
+            {{- with .Values.oidc.workloadIssuerUrl }}
+            # ADR 0117: app write tokens are verified against core's workload issuer.
+            - name: BOOTH_OIDC_WORKLOAD_ISSUER_URL
+              value: {{ . | quote }}
+            {{- end }}
+            - name: BOOTH_WRITES_RATE
+              value: {{ .Values.writes.ratePerSecond | quote }}
+            - name: BOOTH_WRITES_BURST
+              value: {{ .Values.writes.burst | quote }}
+            - name: BOOTH_WRITES_AUDIT_RETENTION
+              value: {{ .Values.writes.auditRetention | quote }}
             {{- with .Values.oidc.jwksUrl }}
             # ADR 0108 key-fetch override. Rendered even without issuerUrl, so that mistake fails
             # at startup instead of being silently ignored.

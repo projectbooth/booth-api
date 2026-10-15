@@ -4,7 +4,9 @@
 # installed from its own chart on a kind cluster, then test/integration/realstack/check run as a Job
 # inside it. Nothing is stubbed: tokens come from Keycloak, the catalog is reached through core's
 # gateway, workspace data through core's broker, booth-database's provider and booth-core's real
-# credential sidecar, and keys are used on core's real public route.
+# credential sidecar, and keys are used on core's real public route. App writes (ADR 0117) use a
+# real app workload token: a stand-in `streamlit` BoothModule gets core's minting credential, and
+# the check mints `streamlit:acme:<app>` tokens with it exactly as booth-streamlit does.
 #
 #   CORE_DIR=../booth-core DATABASE_DIR=../booth-database CATALOG_DIR=../booth-catalog \
 #     bash hack/realstack-integration.sh
@@ -53,7 +55,7 @@ kind load docker-image booth-core:rs booth-database:rs booth-catalog:rs booth-ap
 
 trap 'dump' ERR
 
-echo "--- Keycloak (alice: acme owner; bob, dave: acme editors; carol: globex owner)"
+echo "--- Keycloak (alice, erin: acme owners; bob, dave: acme editors; carol: globex owner)"
 PASSWORD=$(openssl rand -hex 12)
 ADMIN_PASSWORD=$(openssl rand -hex 12)
 kubectl create namespace keycloak --dry-run=client -o yaml | kubectl apply -f - >/dev/null
@@ -123,12 +125,35 @@ echo "--- booth-api (data access on: core.url set)"
 kubectl create namespace booth-api --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 helm upgrade --install a charts/booth-api -n booth-api \
   --set core.url=$CORE_URL --set oidc.issuerUrl=$ISSUER --set oidc.clientId=booth-design \
+  --set oidc.workloadIssuerUrl=$CORE_URL \
   --set image.repository=booth-api --set image.tag=rs --set image.pullPolicy=Never --wait --timeout 10m >/dev/null
 kubectl get boothmodule -A -o custom-columns=NS:.metadata.namespace,ID:.spec.id,PUBLIC:.spec.publicRoutes.pathPrefixes,MINT:.spec.workloadIdentity.mint
 
 echo "--- check (in-cluster, in a namespace booth-database's NetworkPolicy admits, to seed tables)"
 kubectl create namespace realstack-check --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl label namespace realstack-check booth.projectbooth.io/database-client=true --overwrite >/dev/null
+# A stand-in for booth-streamlit's manifest (id streamlit, workloadIdentity.mint): core delivers its
+# minting credential into this namespace, so the check mints real app tokens
+# (streamlit:<workspace>:<appId>, roleCeiling viewer) the way booth-streamlit does. Nothing serves it.
+kubectl apply -f - >/dev/null <<EOF
+apiVersion: booth.projectbooth.io/v1alpha1
+kind: BoothModule
+metadata: {name: streamlit, namespace: realstack-check}
+spec:
+  id: streamlit
+  displayName: Streamlit (realstack stand-in)
+  version: 0.0.0
+  contractVersion: "0.1.0"
+  hasOwnUi: false
+  healthCheckPath: /healthz
+  workloadIdentity: {mint: true}
+  serviceRef: {name: streamlit-stand-in, port: 8080}
+EOF
+for _ in $(seq 60); do
+  kubectl -n realstack-check get secret booth-workload-minting-credentials >/dev/null 2>&1 && break
+  sleep 2
+done
+kubectl -n realstack-check get secret booth-workload-minting-credentials >/dev/null
 kubectl -n realstack-check delete job check --ignore-not-found >/dev/null
 kubectl -n realstack-check apply -f - >/dev/null <<EOF
 apiVersion: batch/v1
@@ -146,6 +171,10 @@ spec:
           env:
             - {name: TEST_PASSWORD, value: "$PASSWORD"}
             - {name: KEYCLOAK_ADMIN_PASSWORD, value: "$ADMIN_PASSWORD"}
+            - name: STREAMLIT_MINT_URL
+              valueFrom: {secretKeyRef: {name: booth-workload-minting-credentials, key: url}}
+            - name: STREAMLIT_MINT_CREDENTIAL
+              valueFrom: {secretKeyRef: {name: booth-workload-minting-credentials, key: credential}}
 EOF
 if ! kubectl -n realstack-check wait --for=condition=complete job/check --timeout=600s; then
   kubectl -n realstack-check logs job/check || true
@@ -154,5 +183,12 @@ if ! kubectl -n realstack-check wait --for=condition=complete job/check --timeou
 fi
 kubectl -n realstack-check logs job/check
 echo "--- booth-api's own log (sidecar lifecycle)"
-kubectl -n booth-api logs deploy/a-booth-api | grep -E "sidecar|data access" | head -20
+API_LOG=$(kubectl -n booth-api logs deploy/a-booth-api)
+echo "$API_LOG" | grep -E "sidecars?:|data access|writes:" | head -60
+# ADR 0117: the write sidecars really ran, revoking stopped one, turning writes off stopped the
+# rest, and no row value the check wrote ever reached booth-api's log.
+echo "$API_LOG" | grep -q "started write sidecar for API" || { echo "FAIL: no write sidecar started"; exit 1; }
+echo "$API_LOG" | grep -q "stopped write sidecar for API .*(grant revoked)" || { echo "FAIL: revoking a grant didn't stop its write sidecar"; exit 1; }
+echo "$API_LOG" | grep -q "stopped write sidecar for API .*(writes turned off)" || { echo "FAIL: turning writes off didn't stop the write sidecars"; exit 1; }
+if echo "$API_LOG" | grep -q "rs-row-value"; then echo "FAIL: a row value reached booth-api's log"; exit 1; fi
 echo "realstack integration: OK"

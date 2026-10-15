@@ -1,7 +1,8 @@
 // Package server assembles booth-api's HTTP surface: the probes, the management API at /api/
 // (internal/api) that the module's UI calls through booth-core's gateway with a person's token, and
 // the generated endpoints at /v1/ (internal/public), which core's gateway reaches as a public route
-// (ADR 0101) and which authenticate by API key.
+// (ADR 0101) and which authenticate by API key, and the app write routes at /app/v1/
+// (internal/appwrite, ADR 0117), which core's gateway reaches with an app's workload token.
 package server
 
 import (
@@ -29,6 +30,8 @@ type Deps struct {
 	API http.Handler
 	// Public serves the generated endpoints (internal/public), mounted at /v1/. Nil mounts nothing.
 	Public http.Handler
+	// App serves app writes (internal/appwrite), mounted at /app/v1/. Nil mounts nothing.
+	App http.Handler
 }
 
 // NewRouter builds the HTTP handler.
@@ -61,6 +64,9 @@ func NewRouter(d Deps) http.Handler {
 	}
 	if d.Public != nil {
 		r.Handle("/v1/*", d.Public)
+	}
+	if d.App != nil {
+		r.Handle("/app/v1/*", d.App)
 	}
 	return r
 }

@@ -31,7 +31,7 @@ type Catalog interface {
 // Store is the slice of internal/store this package needs.
 type Store interface {
 	CreateAPI(ctx context.Context, d apidef.Definition) (apidef.Definition, error)
-	UpdateSnapshot(ctx context.Context, d apidef.Definition) (apidef.Definition, error)
+	UpdateSnapshot(ctx context.Context, d apidef.Definition, writableColumns []string) (apidef.Definition, error)
 	GetAPI(ctx context.Context, workspace, id string) (apidef.Definition, error)
 	ListAPIs(ctx context.Context, workspace string) ([]apidef.Definition, error)
 	DeleteAPI(ctx context.Context, workspace, id string) error
@@ -59,7 +59,9 @@ func (s Service) Generate(ctx context.Context, who auth.Identity, datasetID stri
 }
 
 // Regenerate re-reads the dataset and the table and replaces the snapshot, keeping the API's id,
-// slug and keys. This is the only way a generated API's columns ever change.
+// slug and keys. This is the only way a generated API's columns ever change. It never widens what
+// can be written (ADR 0117): the write settings keep only columns still writable in the new
+// snapshot, and a new column stays read-only until an owner ticks it.
 func (s Service) Regenerate(ctx context.Context, who auth.Identity, id string) (apidef.Definition, error) {
 	old, err := s.Store.GetAPI(ctx, who.Workspace, id)
 	if err != nil {
@@ -74,7 +76,7 @@ func (s Service) Regenerate(ctx context.Context, who auth.Identity, id string) (
 		return apidef.Definition{}, err
 	}
 	d.ID = old.ID
-	return s.Store.UpdateSnapshot(ctx, d)
+	return s.Store.UpdateSnapshot(ctx, d, table.NewModel(d).WritableCandidates())
 }
 
 func (s Service) snapshot(ctx context.Context, who auth.Identity, ds catalog.Dataset) (apidef.Definition, error) {

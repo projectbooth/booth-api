@@ -24,6 +24,45 @@ export interface ApiDefinition {
   createdBy: string;
   createdAt: string;
   generatedAt: string;
+  /** Snapshots older than 2 predate writes: regenerate before turning writes on. */
+  snapshotVersion?: number;
+  /** Write settings (ADR 0117); null when writes are off. */
+  writes?: WriteSettings | null;
+}
+
+export type WriteOperation = "insert" | "update" | "delete";
+
+/** What an owner turned on for an API (ADR 0117). Columns are real column names. */
+export interface WriteSettings {
+  operations: WriteOperation[];
+  columns: string[];
+  version: number;
+  updatedBy: string;
+  updatedAt: string;
+}
+
+/** GET /api/apis/{id}/writes. */
+export interface WritesView {
+  apiId: string;
+  writes: WriteSettings | null;
+  columns: { column: string; field?: string; type: string; writable: boolean; reason?: string; required: boolean }[];
+  hasPrimaryKey: boolean;
+  needsRegenerate: boolean;
+  dataAccess: boolean;
+}
+
+/** A write grant to an app (principal streamlit:<workspace>:<appId>). */
+export interface WriteGrant {
+  id: string;
+  apiId: string;
+  principal: string;
+  operations: WriteOperation[];
+  /** null: every column the API makes writable. */
+  columns: string[] | null;
+  grantedBy: string;
+  grantedByName: string;
+  createdAt: string;
+  revokedAt: string | null;
 }
 
 /** An API key as listed. The secret is never part of this. */
