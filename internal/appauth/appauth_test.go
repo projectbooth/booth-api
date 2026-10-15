@@ -113,3 +113,30 @@ func TestVerifier(t *testing.T) {
 		t.Error("a token signed by another key was accepted")
 	}
 }
+
+func TestCheckService(t *testing.T) {
+	s, err := CheckService("streamlit:acme:grants", "streamlit", []string{"/workspaces/acme/viewer"})
+	if err != nil || s.Workspace != "acme" || s.Subject != "streamlit:acme:grants" {
+		t.Fatalf("grants service = %+v, %v", s, err)
+	}
+	for name, tc := range map[string]struct {
+		sub, module string
+		groups      []string
+	}{
+		"an app":             {"streamlit:acme:budget", "streamlit", []string{"/workspaces/acme/viewer"}},
+		"another module":     {"streamlit:acme:grants", "pipeline", []string{"/workspaces/acme/viewer"}},
+		"workspace mismatch": {"streamlit:acme:grants", "streamlit", []string{"/workspaces/globex/viewer"}},
+		"no groups":          {"streamlit:acme:grants", "streamlit", nil},
+	} {
+		if _, err := CheckService(tc.sub, tc.module, tc.groups); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// The grants service is never an app: it can't write, and can't be granted.
+	if _, err := Check("streamlit:acme:grants", "streamlit", []string{"/workspaces/acme/viewer"}); err == nil {
+		t.Error("the grants service token was accepted as an app")
+	}
+	if ValidPrincipal("streamlit:acme:grants", "acme") {
+		t.Error("the grants service is a valid grant principal")
+	}
+}

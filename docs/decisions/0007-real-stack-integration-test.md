@@ -59,7 +59,8 @@ booth-core (its API, the gateway and the public route):
      alice's grant keeps working.
    - **Revocation.**
      - Revoking a grant stops the app.
-     - revoke-principal revokes the other app's grant.
+     - booth-streamlit's grants service token (`streamlit:acme:grants`) revokes the other app's grant
+       with revoke-principal, and is refused on grant creation and listing (ADR 0117 item 1a).
      - The write log has entries and no row values.
      - Turning writes off revokes the database grant: the lease from the step above no longer
        connects.

@@ -26,6 +26,7 @@ import (
 
 	"github.com/projectbooth/booth-api/internal/apidef"
 	"github.com/projectbooth/booth-api/internal/apis"
+	"github.com/projectbooth/booth-api/internal/appauth"
 	"github.com/projectbooth/booth-api/internal/auth"
 	"github.com/projectbooth/booth-api/internal/broker"
 	"github.com/projectbooth/booth-api/internal/catalog"
@@ -46,12 +47,15 @@ type Deps struct {
 	APIs     apis.Service
 	Keys     keys.Service
 	Writes   writes.Service
+	// ServiceVerifier returns the verifier for booth-streamlit's grants service token (core's
+	// workload issuer), or nil when app writes aren't configured. Used by revoke-principal only.
+	ServiceVerifier func() appauth.ServiceVerifier
 }
 
 // NewHandler builds the /api/ router.
 func NewHandler(d Deps) http.Handler {
 	r := chi.NewRouter()
-	r.Use(func(next http.Handler) http.Handler {
+	people := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			v := d.Verifier()
 			if v == nil {
@@ -60,8 +64,19 @@ func NewHandler(d Deps) http.Handler {
 			}
 			auth.Middleware(v)(next).ServeHTTP(w, req)
 		})
-	})
+	}
 	h := handlers{d}
+	// revoke-principal alone also takes booth-streamlit's grants service token (ADR 0117 item 1a);
+	// every other route is for people only.
+	r.Method(http.MethodPost, "/api/write-grants/revoke-principal", h.serviceOr(people(owner(http.HandlerFunc(h.revokePrincipal)))))
+	r.Group(func(r chi.Router) {
+		r.Use(people)
+		h.routes(r)
+	})
+	return r
+}
+
+func (h handlers) routes(r chi.Router) {
 	r.Get("/api/apis", h.listAPIs)
 	r.Get("/api/apis/{id}", h.getAPI)
 	r.Get("/api/apis/{id}/schema", h.schema)
@@ -79,9 +94,38 @@ func NewHandler(d Deps) http.Handler {
 	r.With(owner).Get("/api/apis/{id}/writes/log", h.writeLog)
 	r.With(owner).Get("/api/write-grants", h.listGrants)
 	r.With(owner).Post("/api/write-grants", h.createGrant)
-	r.With(owner).Post("/api/write-grants/revoke-principal", h.revokePrincipal)
 	r.With(owner).Post("/api/write-grants/{id}/revoke", h.revokeGrant)
-	return r
+}
+
+// serviceOr serves revoke-principal for booth-streamlit's grants service token
+// (`streamlit:<workspace>:grants`, verified against core's workload issuer, ADR 0117 item 1a), with
+// the workspace taken from that token, and hands every other caller to people (an owner's sign-in
+// token). The service may only revoke: Writes.RevokePrincipal accepts nothing but app principals
+// in the token's own workspace, and no other route accepts the token at all.
+func (h handlers) serviceOr(people http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h.d.ServiceVerifier != nil {
+			if sv := h.d.ServiceVerifier(); sv != nil {
+				if tok := bearer(r); tok != "" {
+					if s, err := sv.VerifyService(r.Context(), tok); err == nil {
+						id := auth.Identity{Subject: s.Subject, DisplayName: s.Subject, Workspace: s.Workspace}
+						h.revokePrincipal(w, r.WithContext(auth.WithIdentity(r.Context(), id)))
+						return
+					}
+				}
+			}
+		}
+		people.ServeHTTP(w, r)
+	})
+}
+
+func bearer(r *http.Request) string {
+	v := r.Header.Get("Authorization")
+	const prefix = "Bearer "
+	if len(v) <= len(prefix) || !strings.EqualFold(v[:len(prefix)], prefix) {
+		return ""
+	}
+	return strings.TrimSpace(v[len(prefix):])
 }
 
 // owner refuses everyone but workspace owners: only owners turn writes on and grant them.

@@ -151,3 +151,28 @@ modules is `docs/contracts/app-writes.md`.
   - the audit log has no values;
   - turning writes off ends the lease;
   - booth-api's log shows the write sidecars starting and stopping, with no row value in it.
+
+## Amendment (ADR 0117 item 1a, 2026-10-15)
+
+booth-streamlit never holds a person's token, so owners grant on booth-api's own page and
+booth-streamlit only links there. Built:
+
+1. **The revoke-only service path.** `POST /api/write-grants/revoke-principal` also accepts
+   booth-streamlit's grants service token: subject exactly `streamlit:<workspace>:grants`,
+   `booth_module: streamlit`, verified against core's workload issuer, with the workspace from the
+   token. `internal/api` serves this one route outside the people-only group (`serviceOr`).
+   - **What it can do.** It can revoke only that workspace's app principals. `:sources`, `:grants`,
+     other workspaces and `key:` are refused.
+   - **What it can't do.** Every other route refuses it (`401`), because they verify only the OIDC
+     issuer.
+   - **Reserved ids.** `grants` joins `sources` as a reserved appId: never an app token, never a
+     principal.
+   - **Testing.** Unit tests cover each refusal and the idempotent second call. realstack mints the
+     service token with the stand-in streamlit module's credential and uses it for the take-ownership
+     revoke.
+2. **The grant form on the Writes panel.**
+   - It takes a principal, the operations (only those the API allows), and optional column
+     narrowing.
+   - It lists the live grants, each with Revoke.
+   - It reads `?writeApi=<slug or id>&writePrincipal=<principal>` from booth-streamlit's link (see
+     `docs/contracts/app-writes.md`).

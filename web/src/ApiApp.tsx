@@ -4,6 +4,7 @@ import {
   deleteApi,
   disableWrites,
   generateApi,
+  createGrant,
   getWrites,
   getOpenAPI,
   getSchema,
@@ -20,7 +21,7 @@ import {
   type GetAccessToken,
 } from "./api/client";
 import { useLoad, type LoadState } from "./hooks";
-import type { ApiDefinition, ApiKey, IssuedKey, Mismatch, WorkspaceRole, WriteOperation, WritesView } from "./types";
+import type { ApiDefinition, ApiKey, IssuedKey, Mismatch, WorkspaceRole, WriteGrant, WriteOperation, WriteSettings, WritesView } from "./types";
 
 /**
  * Props contract pinned by ADR 0031 (workspace/role/theme) and ADR 0033 (getAccessToken): plain
@@ -47,6 +48,8 @@ export function ApiApp({ workspace, role, theme, getAccessToken }: ApiAppProps) 
   const canWrite = role === "owner" || role === "editor";
   const isOwner = role === "owner";
   const apis = useLoad(() => listApis(api), [api]);
+  const link = useMemo(grantLink, []);
+  const linked = link && apis.state.status === "ready" ? apis.state.data.find((d) => d.id === link.api || d.slug === link.api) : undefined;
 
   return (
     <div data-theme={theme} className="flex flex-col gap-8 text-slate-900 dark:text-slate-100">
@@ -58,7 +61,24 @@ export function ApiApp({ workspace, role, theme, getAccessToken }: ApiAppProps) 
       </header>
 
 
-      <ApisSection api={api} state={apis.state} reload={apis.reload} canWrite={canWrite} isOwner={isOwner} />
+      {link && apis.state.status === "ready" && (
+        <div role="status" className="rounded-md border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-900 dark:border-indigo-900 dark:bg-indigo-950 dark:text-indigo-100">
+          {!linked ? (
+            <>
+              A Streamlit app asked to write to an API named <span className="font-mono">{link.api}</span>, but there is no such API in this workspace.
+            </>
+          ) : isOwner ? (
+            <>
+              Grant <span className="font-mono">{link.principal || "the app"}</span> writes to {linked.datasetName}: check the form under its Writes below.
+            </>
+          ) : (
+            <>
+              A Streamlit app asked to write to {linked.datasetName}. Only a workspace owner can grant that; ask one to open this page.
+            </>
+          )}
+        </div>
+      )}
+      <ApisSection api={api} state={apis.state} reload={apis.reload} canWrite={canWrite} isOwner={isOwner} link={linked ? link : null} />
       {canWrite && apis.state.status === "ready" && <KeysSection api={api} apis={apis.state.data} />}
     </div>
   );
@@ -72,12 +92,14 @@ function ApisSection({
   reload,
   canWrite,
   isOwner,
+  link,
 }: {
   api: ApiContext;
   state: LoadState<ApiDefinition[]>;
   reload: () => void;
   canWrite: boolean;
   isOwner: boolean;
+  link: GrantLink | null;
 }) {
   return (
     <section aria-labelledby="apis-heading" className="flex flex-col gap-3">
@@ -93,7 +115,15 @@ function ApisSection({
         ) : (
           <div className="flex flex-col gap-3">
             {state.data.map((d) => (
-              <ApiCard key={d.id} api={api} def={d} canWrite={canWrite} isOwner={isOwner} onChange={reload} />
+              <ApiCard
+                key={d.id}
+                api={api}
+                def={d}
+                canWrite={canWrite}
+                isOwner={isOwner}
+                onChange={reload}
+                prefill={link && (link.api === d.id || link.api === d.slug) ? link.principal : undefined}
+              />
             ))}
           </div>
         ))}
@@ -159,7 +189,22 @@ function GenerateForm({ api, existing, onDone }: { api: ApiContext; existing: Ap
   );
 }
 
-function ApiCard({ api, def, canWrite, isOwner, onChange }: { api: ApiContext; def: ApiDefinition; canWrite: boolean; isOwner: boolean; onChange: () => void }) {
+function ApiCard({
+  api,
+  def,
+  canWrite,
+  isOwner,
+  onChange,
+  prefill,
+}: {
+  api: ApiContext;
+  def: ApiDefinition;
+  canWrite: boolean;
+  isOwner: boolean;
+  onChange: () => void;
+  /** Set when the owner arrived from booth-streamlit's link for this API: the app's principal. */
+  prefill?: string;
+}) {
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState<{ message: string; mismatches?: Mismatch[] } | null>(null);
@@ -245,7 +290,7 @@ function ApiCard({ api, def, canWrite, isOwner, onChange }: { api: ApiContext; d
       </p>
       <Endpoints slug={def.slug} />
       <SchemaToggle api={api} id={def.id} generatedAt={def.generatedAt} />
-      <WritesToggle api={api} def={def} isOwner={isOwner} onChange={onChange} />
+      <WritesToggle api={api} def={def} isOwner={isOwner} onChange={onChange} prefill={prefill} />
       {error && <ErrorBanner message={error.message} mismatches={error.mismatches} />}
     </Panel>
   );
@@ -253,14 +298,42 @@ function ApiCard({ api, def, canWrite, isOwner, onChange }: { api: ApiContext; d
 
 // ---- writes (ADR 0117) --------------------------------------------------------------------------
 
+/**
+ * booth-streamlit's "Write targets" panel links here so an owner can grant an app (ADR 0117 item 1a;
+ * docs/contracts/app-writes.md): /apis?writeApi=<API slug or id>&writePrincipal=streamlit:<ws>:<appId>.
+ */
+export interface GrantLink {
+  api: string;
+  principal: string;
+}
+
+function grantLink(): GrantLink | null {
+  const q = new URLSearchParams(window.location.search);
+  const api = q.get("writeApi");
+  if (!api) return null;
+  return { api, principal: q.get("writePrincipal") ?? "" };
+}
+
 const OPERATIONS: { op: WriteOperation; label: string }[] = [
   { op: "insert", label: "Add rows" },
   { op: "update", label: "Change rows" },
   { op: "delete", label: "Delete rows" },
 ];
 
-function WritesToggle({ api, def, isOwner, onChange }: { api: ApiContext; def: ApiDefinition; isOwner: boolean; onChange: () => void }) {
-  const [open, setOpen] = useState(false);
+function WritesToggle({
+  api,
+  def,
+  isOwner,
+  onChange,
+  prefill,
+}: {
+  api: ApiContext;
+  def: ApiDefinition;
+  isOwner: boolean;
+  onChange: () => void;
+  prefill?: string;
+}) {
+  const [open, setOpen] = useState(prefill !== undefined && isOwner);
   if (!isOwner && !def.writes) return null;
   return (
     <div className="mt-2">
@@ -273,12 +346,26 @@ function WritesToggle({ api, def, isOwner, onChange }: { api: ApiContext; def: A
         {open ? "Hide writes" : def.writes ? "Writes" : "Let apps write…"}
       </button>
       {/* the settings version in the key reloads after a save elsewhere */}
-      {open && <WritesPanel key={`${def.generatedAt}@${def.writes?.version ?? 0}`} api={api} def={def} isOwner={isOwner} onChange={onChange} />}
+      {open && (
+        <WritesPanel key={`${def.generatedAt}@${def.writes?.version ?? 0}`} api={api} def={def} isOwner={isOwner} onChange={onChange} prefill={prefill} />
+      )}
     </div>
   );
 }
 
-function WritesPanel({ api, def, isOwner, onChange }: { api: ApiContext; def: ApiDefinition; isOwner: boolean; onChange: () => void }) {
+function WritesPanel({
+  api,
+  def,
+  isOwner,
+  onChange,
+  prefill,
+}: {
+  api: ApiContext;
+  def: ApiDefinition;
+  isOwner: boolean;
+  onChange: () => void;
+  prefill?: string;
+}) {
   const view = useLoad(() => getWrites(api, def.id), [api, def.id]);
   if (view.state.status === "loading") return <Muted>Loading write settings…</Muted>;
   if (view.state.status === "error") return <ErrorBanner message={view.state.error} />;
@@ -296,7 +383,8 @@ function WritesPanel({ api, def, isOwner, onChange }: { api: ApiContext; def: Ap
           , columns {(v.writes?.columns ?? []).join(", ")}. Only workspace owners change this.
         </p>
       )}
-      {isOwner && v.writes && <GrantsList api={api} apiId={def.id} />}
+      {isOwner && v.writes && <GrantsSection api={api} def={def} writes={v.writes} prefill={prefill} />}
+      {isOwner && !v.writes && prefill !== undefined && <Muted>Turn writes on first; then grant the app below.</Muted>}
     </div>
   );
 }
@@ -371,9 +459,10 @@ function WritesForm({ api, def, view, onSaved }: { api: ApiContext; def: ApiDefi
           </p>
         )}
         <p>
-          Turning writes on doesn&apos;t let any app write by itself. Each app also needs a grant, made from that app&apos;s settings page in Streamlit
-          (Write targets). Anyone who can open a granted app can then write through it, viewers included. Only workspace owners can change these
-          settings or grant apps.
+          Turning writes on doesn&apos;t let any app write by itself. Each app also needs its own grant, made under &quot;Grant an app&quot; here,
+          and its owner must declare this API in the app&apos;s settings page in Streamlit (Write targets), which links back here with the app filled
+          in. Anyone who can open a granted app can then write through it, viewers included. Only workspace owners can change these settings or
+          grant apps.
         </p>
       </div>
       <fieldset className="flex flex-wrap gap-4">
@@ -441,30 +530,154 @@ function WritesForm({ api, def, view, onSaved }: { api: ApiContext; def: ApiDefi
   );
 }
 
-function GrantsList({ api, apiId }: { api: ApiContext; apiId: string }) {
-  const grants = useLoad(() => listGrants(api, apiId), [api, apiId]);
+function GrantsSection({ api, def, writes, prefill }: { api: ApiContext; def: ApiDefinition; writes: WriteSettings; prefill?: string }) {
+  const grants = useLoad(() => listGrants(api, def.id), [api, def.id]);
   const [error, setError] = useState<string | null>(null);
-  if (grants.state.status === "loading") return <Muted>Loading grants…</Muted>;
-  if (grants.state.status === "error") return <ErrorBanner message={grants.state.error} />;
   return (
-    <div className="flex flex-col gap-1 text-sm">
+    <div className="flex flex-col gap-3 text-sm">
+      <GrantForm api={api} def={def} writes={writes} prefill={prefill} onGranted={grants.reload} />
+      <GrantsList api={api} state={grants.state} reload={grants.reload} error={error} setError={setError} />
+    </div>
+  );
+}
+
+const PRINCIPAL_HINT = "streamlit:<workspace>:<appId>";
+
+function GrantForm({
+  api,
+  def,
+  writes,
+  prefill,
+  onGranted,
+}: {
+  api: ApiContext;
+  def: ApiDefinition;
+  writes: WriteSettings;
+  prefill?: string;
+  onGranted: () => void;
+}) {
+  const [principal, setPrincipal] = useState(prefill ?? "");
+  const [ops, setOps] = useState<Set<WriteOperation>>(new Set(writes.operations.includes("insert") ? ["insert"] : writes.operations.slice(0, 1)));
+  const [narrow, setNarrow] = useState(false);
+  const [cols, setCols] = useState<Set<string>>(new Set(writes.columns));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState<string | null>(null);
+  const writesValues = ops.has("insert") || ops.has("update");
+  const chosenOps = OPERATIONS.map((o) => o.op).filter((o) => ops.has(o));
+  const valid = principal.trim() !== "" && chosenOps.length > 0 && (!narrow || !writesValues || cols.size > 0);
+  const toggle = <T,>(set: Set<T>, item: T, apply: (s: Set<T>) => void) => {
+    const next = new Set(set);
+    if (next.has(item)) next.delete(item);
+    else next.add(item);
+    apply(next);
+  };
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    setDone(null);
+    try {
+      const g = await createGrant(api, def.id, principal.trim(), chosenOps, narrow && writesValues ? writes.columns.filter((c) => cols.has(c)) : null);
+      setDone(`Granted. ${g.principal} can now ${describe(g.operations)} through this API.`);
+      onGranted();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form onSubmit={submit} className="flex flex-col gap-2 rounded bg-slate-50 p-2 dark:bg-slate-950">
+      <p className="font-medium">Grant an app</p>
+      <div className="flex flex-col gap-1">
+        <label htmlFor={`principal-${def.id}`}>App</label>
+        <input
+          id={`principal-${def.id}`}
+          className="max-w-md rounded-md border border-slate-300 bg-white px-2 py-1.5 font-mono text-xs dark:border-slate-700 dark:bg-slate-800"
+          value={principal}
+          onChange={(e) => setPrincipal(e.target.value)}
+          placeholder={PRINCIPAL_HINT}
+          aria-describedby={`principal-help-${def.id}`}
+        />
+        <span id={`principal-help-${def.id}`} className="text-xs text-slate-500 dark:text-slate-400">
+          The app&apos;s full id, {PRINCIPAL_HINT}, shown in its settings in Streamlit (Write targets). Granting the same app again replaces its grant.
+        </span>
+      </div>
+      <fieldset className="flex flex-wrap gap-4">
+        <legend className="mb-1">It may</legend>
+        {OPERATIONS.filter((o) => writes.operations.includes(o.op)).map(({ op, label }) => (
+          <label key={op} className="flex items-center gap-2">
+            <input type="checkbox" checked={ops.has(op)} onChange={() => toggle(ops, op, setOps)} />
+            {label}
+          </label>
+        ))}
+      </fieldset>
+      {writesValues && (
+        <div className="flex flex-col gap-1">
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={narrow} onChange={() => setNarrow(!narrow)} />
+            Only some of the writable columns
+          </label>
+          {narrow &&
+            writes.columns.map((c) => (
+              <label key={c} className="ml-6 flex items-center gap-2">
+                <input type="checkbox" checked={cols.has(c)} onChange={() => toggle(cols, c, setCols)} />
+                <span className="font-mono text-xs">{c}</span>
+              </label>
+            ))}
+          {!narrow && <span className="text-xs text-slate-500 dark:text-slate-400">It can set every writable column: {writes.columns.join(", ")}.</span>}
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-3">
+        <Button type="submit" primary disabled={busy || !valid}>
+          {busy ? "Granting…" : "Grant"}
+        </Button>
+        {!valid && <span className="text-xs text-slate-500 dark:text-slate-400">Enter the app&apos;s id and tick at least one action</span>}
+      </div>
+      {done && <p className="text-xs text-emerald-700 dark:text-emerald-400">{done}</p>}
+      {error && <ErrorBanner message={error} />}
+    </form>
+  );
+}
+
+function GrantsList({
+  api,
+  state,
+  reload,
+  error,
+  setError,
+}: {
+  api: ApiContext;
+  state: LoadState<WriteGrant[]>;
+  reload: () => void;
+  error: string | null;
+  setError: (e: string | null) => void;
+}) {
+  if (state.status === "loading") return <Muted>Loading grants…</Muted>;
+  if (state.status === "error") return <ErrorBanner message={state.error} />;
+  return (
+    <div className="flex flex-col gap-1">
       <p className="font-medium">Apps that may write</p>
-      {grants.state.data.length === 0 ? (
-        <Muted>None yet. Grant an app from its settings in Streamlit (Write targets).</Muted>
+      {state.data.length === 0 ? (
+        <Muted>None yet.</Muted>
       ) : (
         <ul className="flex flex-col gap-1">
-          {grants.state.data.map((g) => (
+          {state.data.map((g) => (
             <li key={g.id} className="flex flex-wrap items-center justify-between gap-2">
               <span>
                 <span className="font-mono text-xs">{g.principal}</span>{" "}
                 <span className="text-xs text-slate-500 dark:text-slate-400">
-                  {describe(g.operations)}, granted by {g.grantedByName}
+                  {describe(g.operations)}
+                  {g.columns ? `, columns ${g.columns.join(", ")}` : ""}, granted by {g.grantedByName}
                 </span>
               </span>
               <Button
                 onClick={() => {
                   setError(null);
-                  revokeGrant(api, g.id).then(grants.reload, (err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+                  revokeGrant(api, g.id).then(reload, (err: unknown) => setError(err instanceof Error ? err.message : String(err)));
                 }}
               >
                 Revoke
