@@ -35,13 +35,12 @@ jobs:
     # (contracts/testing-strategy.md): bump deliberately.
     #   CORE_REF     a562691: v0.3.5 (the tablewrite broker access, apiwrite: reserved to module
     #                         api; core's default branch is master)
-    #   DATABASE_REF 4c730d3: main at booth-database PR #15's merge (table-scoped write leases,
-    #                         access tablewrite). Not tagged yet: move to its release tag when cut.
+    #   DATABASE_REF v0.1.4 (4c730d3): table-scoped write leases, access tablewrite (its PR #15)
     #   CATALOG_REF  c898575: v0.1.5 (auto-listed postgres datasets from database.table.* events)
     runs-on: ubuntu-24.04
     env:
       CORE_REF: a5626916af39aeb29e6ecc67f428d4fd0ae5d2df
-      DATABASE_REF: 4c730d310923ed1a9835ff5e25f53b8d06b829f3
+      DATABASE_REF: v0.1.4
       CATALOG_REF: c89857522c7076d6fb3404a8a6048a7880ca03b6
     steps:
       - uses: actions/checkout@v4

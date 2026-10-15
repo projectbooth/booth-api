@@ -172,6 +172,19 @@ describe("ApiApp", () => {
     expect(screen.queryByText("Never")).not.toBeInTheDocument();
   });
 
+  it("says why Create key is disabled until there is a name and a dataset", async () => {
+    mockFetch(base);
+    const user = userEvent.setup();
+    render(<ApiApp workspace="acme" role="editor" theme="light" getAccessToken={() => "tok"} />);
+    const create = await screen.findByRole("button", { name: "Create key" });
+    expect(create).toBeDisabled();
+    expect(screen.getByText("Enter a name and tick at least one dataset")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("New key name"), "export");
+    await user.click(screen.getByRole("checkbox", { name: "Orders" }));
+    expect(create).toBeEnabled();
+    expect(screen.queryByText("Enter a name and tick at least one dataset")).not.toBeInTheDocument();
+  });
+
   it("revokes a key only after confirming", async () => {
     let revoked = false;
     const calls = mockFetch({
@@ -218,6 +231,8 @@ describe("ApiApp", () => {
       render(<ApiApp workspace="acme" role="owner" theme="light" getAccessToken={() => "tok"} />);
       await user.click(await screen.findByRole("button", { name: "Let apps write…" }));
       expect(await screen.findByLabelText("Add rows")).toBeChecked();
+      expect(screen.getByText(/Writes are off: no app can change/)).toBeInTheDocument();
+      expect(screen.getByText(/Each app also needs a grant, made from that app's settings page in Streamlit/)).toBeInTheDocument();
       expect(screen.getByText(/a primary-key column the database fills in/)).toBeInTheDocument();
       const save = screen.getByRole("button", { name: "Turn writes on" });
       expect(save).toBeDisabled();

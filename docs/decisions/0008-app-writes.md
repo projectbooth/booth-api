@@ -1,7 +1,8 @@
 # 0008: App writes through booth-api (ADR 0117)
 
-Date: 2026-10-15. Status: **built; not merged.** The coordinator holds the merge until the homelab
-read-path smoke test (`docs/homelab-smoke-test.md`) has passed.
+Date: 2026-10-15. Status: **accepted** (coordinator review of PR #17, 2026-10-15). The `onBehalfOf`
+gap (departure 1) is accepted as is: booth-database's log shows the lease and the granting owner,
+and booth-api's write audit log holds the app and the reported user.
 
 Built from my design note (`docs/design-app-writes.md`, on the local branch `design-app-writes`),
 with ADR 0117's "Reconciled design" overruling it where they differ. The wire contract for other
@@ -136,7 +137,7 @@ modules is `docs/contracts/app-writes.md`.
   - The management tests cover owners only, and app tokens refused (`401`).
   - The write-sidecar tests cover flags, mint identity, version replacement and stops. They run on
     Linux, as CI does.
-- **realstack (step 8 of `0007`):** real booth-core v0.3.5, booth-database at PR #15's merge, real
+- **realstack (step 8 of `0007`):** real booth-core v0.3.5, booth-database v0.1.4, real
   sidecars, and real app tokens minted with a stand-in `streamlit` module's credential. It checks:
   - owners only;
   - insert, update, `If-Match`, GraphQL and idempotency;

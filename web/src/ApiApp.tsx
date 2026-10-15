@@ -351,6 +351,31 @@ function WritesForm({ api, def, view, onSaved }: { api: ApiContext; def: ApiDefi
         void run(() => saveWrites(api, def.id, chosenOps, chosenCols));
       }}
     >
+      <div className="flex flex-col gap-1 rounded bg-slate-50 p-2 text-slate-700 dark:bg-slate-950 dark:text-slate-300">
+        <p className="font-medium">What these settings mean</p>
+        {view.writes ? (
+          <p>
+            Writes are on. Apps you grant can {describe(view.writes.operations)} in{" "}
+            <span className="font-mono">
+              {def.table.schema}.{def.table.name}
+            </span>
+            {view.writes.columns.length > 0 ? `, and can set only these columns: ${view.writes.columns.join(", ")}` : ""}.
+          </p>
+        ) : (
+          <p>
+            Writes are off: no app can change{" "}
+            <span className="font-mono">
+              {def.table.schema}.{def.table.name}
+            </span>{" "}
+            through this API.
+          </p>
+        )}
+        <p>
+          Turning writes on doesn&apos;t let any app write by itself. Each app also needs a grant, made from that app&apos;s settings page in Streamlit
+          (Write targets). Anyone who can open a granted app can then write through it, viewers included. Only workspace owners can change these
+          settings or grant apps.
+        </p>
+      </div>
       <fieldset className="flex flex-wrap gap-4">
         <legend className="mb-1 font-medium">What apps may do</legend>
         {OPERATIONS.map(({ op, label }) => (
@@ -619,10 +644,13 @@ function IssueForm({ api, apis, onIssued }: { api: ApiContext; apis: ApiDefiniti
             </label>
           ))}
         </fieldset>
-        <div>
+        <div className="flex flex-wrap items-center gap-3">
           <Button type="submit" primary disabled={busy || name.trim() === "" || scope.size === 0}>
             {busy ? "Creating…" : "Create key"}
           </Button>
+          {(name.trim() === "" || scope.size === 0) && (
+            <span className="text-xs text-slate-500 dark:text-slate-400">Enter a name and tick at least one dataset</span>
+          )}
         </div>
         {error && <ErrorBanner message={error} />}
       </form>

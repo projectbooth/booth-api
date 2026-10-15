@@ -81,8 +81,8 @@ booth-core (its API, the gateway and the public route):
 They are bumped deliberately, the same practice as booth-logging's `real-core` job.
 - **`CORE_REF`:** v0.3.5, `a562691`. It has the `tablewrite` broker access, `apiwrite:` reserved to
   module `api`, and the published credential-sidecar booth-api's Dockerfile pins.
-- **`DATABASE_REF`:** `4c730d3`, booth-database's `main` at PR #15's merge (table-scoped write
-  leases). It is **not a release tag yet**; move it to the tag when one is cut.
+- **`DATABASE_REF`:** v0.1.4 (`4c730d3`, table-scoped write leases). This one pin is the release tag
+  itself; the commit shows in the run's "using siblings/booth-database at …" line.
 - **`CATALOG_REF`:** v0.1.5, `c898575`.
 
 Core 0.3.x bundles Keycloak and an Ingress by default; the script turns both off (it brings its own

@@ -1,8 +1,8 @@
 {
   "name": "@projectbooth/api-ui",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
-  "description": "Native-mode API UI (ADR 0030, ADR 0100): choose a catalog dataset, generate its read-only REST/GraphQL API, and issue or revoke API keys \u2014 as a component booth-design mounts via its native-module registry.",
+  "description": "Native-mode API UI (ADR 0030, ADR 0100): choose a catalog dataset, generate its read-only REST/GraphQL API, and issue or revoke API keys — as a component booth-design mounts via its native-module registry.",
   "license": "UNLICENSED",
   "repository": {
     "type": "git",
