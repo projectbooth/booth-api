@@ -69,14 +69,17 @@ func Introspect(ctx context.Context, pool Querier, ref apidef.TableRef) (Table, 
 		return Table{}, err
 	}
 
-	rows, err := pool.Query(ctx, `SELECT attname, format_type(atttypid, atttypmod), NOT attnotnull
+	// atthasdef is also true for a generated column (its expression is stored as a default), so
+	// HasDefault excludes those; identity columns have no default row and are reported apart.
+	rows, err := pool.Query(ctx, `SELECT attname, format_type(atttypid, atttypmod), NOT attnotnull,
+		atthasdef AND attgenerated = '', attidentity::text, attgenerated <> ''
 		FROM pg_attribute WHERE attrelid = $1 AND attnum > 0 AND NOT attisdropped ORDER BY attnum`, oid)
 	if err != nil {
 		return Table{}, err
 	}
 	cols, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (apidef.Column, error) {
 		var c apidef.Column
-		err := r.Scan(&c.Name, &c.Type, &c.Nullable)
+		err := r.Scan(&c.Name, &c.Type, &c.Nullable, &c.HasDefault, &c.Identity, &c.Generated)
 		return c, err
 	})
 	if err != nil {

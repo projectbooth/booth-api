@@ -30,7 +30,16 @@ type Column struct {
 	Type        string `json:"type"`
 	Nullable    bool   `json:"nullable"`
 	Description string `json:"description,omitempty"`
+	// What writes need (snapshot version 2 on, ADR 0117): whether the column has a default, its
+	// identity kind ("a" GENERATED ALWAYS, "d" BY DEFAULT, "" none) and whether it is generated.
+	HasDefault bool   `json:"hasDefault,omitempty"`
+	Identity   string `json:"identity,omitempty"`
+	Generated  bool   `json:"generated,omitempty"`
 }
+
+// SnapshotVersion is the version of the snapshot this code takes. Version 1 snapshots predate
+// the write fields on Column; an API with one must be regenerated before writes can be turned on.
+const SnapshotVersion = 2
 
 // Definition is one generated API. There is at most one per (workspace, dataset).
 type Definition struct {
@@ -46,6 +55,43 @@ type Definition struct {
 	CreatedBy   string    `json:"createdBy"`
 	CreatedAt   time.Time `json:"createdAt"`
 	GeneratedAt time.Time `json:"generatedAt"`
+	// SnapshotVersion is the version of the code that took the snapshot (see SnapshotVersion).
+	SnapshotVersion int `json:"snapshotVersion"`
+	// Writes is the API's write settings; nil means writes are off (ADR 0117).
+	Writes *WriteSettings `json:"writes"`
+}
+
+// Write operations (ADR 0117). Insert is the default; update and delete are opt-in per API.
+const (
+	OpInsert = "insert"
+	OpUpdate = "update"
+	OpDelete = "delete"
+)
+
+// Operations lists every write operation, in display order.
+var Operations = []string{OpInsert, OpUpdate, OpDelete}
+
+// WriteSettings is what an owner turned on for an API: the operations and the writable columns
+// (real column names). Version increases on every save.
+type WriteSettings struct {
+	Operations []string  `json:"operations"`
+	Columns    []string  `json:"columns"`
+	Version    int64     `json:"version"`
+	UpdatedBy  string    `json:"updatedBy"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+}
+
+// Allows reports whether op is among the settings' operations.
+func (w *WriteSettings) Allows(op string) bool {
+	if w == nil {
+		return false
+	}
+	for _, o := range w.Operations {
+		if o == op {
+			return true
+		}
+	}
+	return false
 }
 
 // CatalogColumn is a column as the catalog describes it (free-form type, ignored here).

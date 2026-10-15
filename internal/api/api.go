@@ -4,8 +4,13 @@
 // generating or deleting an API and anything to do with keys needs editor or owner (the
 // ADR 0038/0048 write precedent).
 //
+// Writes (ADR 0117): turning writes on or off, changing them, and every write-grant route need the
+// owner role, not just editor ("Reconciled design" item 5). Reading an API's write settings is open
+// to any role, like the API itself. docs/contracts/app-writes.md documents these routes for
+// booth-streamlit and booth-storage.
+//
 // The generated endpoints themselves are not here: they are served on core's public routes
-// (ADR 0101) and authenticated by key, once core's change lands.
+// (ADR 0101) and authenticated by key, and app writes on /app/v1/ (internal/appwrite).
 package api
 
 import (
@@ -14,17 +19,21 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/projectbooth/booth-api/internal/apidef"
 	"github.com/projectbooth/booth-api/internal/apis"
 	"github.com/projectbooth/booth-api/internal/auth"
+	"github.com/projectbooth/booth-api/internal/broker"
 	"github.com/projectbooth/booth-api/internal/catalog"
 	"github.com/projectbooth/booth-api/internal/gql"
 	"github.com/projectbooth/booth-api/internal/keys"
 	"github.com/projectbooth/booth-api/internal/source"
 	"github.com/projectbooth/booth-api/internal/store"
+	"github.com/projectbooth/booth-api/internal/writes"
 )
 
 const maxBody = 64 << 10
@@ -36,6 +45,7 @@ type Deps struct {
 	Verifier func() auth.TokenVerifier
 	APIs     apis.Service
 	Keys     keys.Service
+	Writes   writes.Service
 }
 
 // NewHandler builds the /api/ router.
@@ -62,7 +72,27 @@ func NewHandler(d Deps) http.Handler {
 	r.With(writer).Get("/api/keys", h.listKeys)
 	r.With(writer).Post("/api/keys", h.issueKey)
 	r.With(writer).Post("/api/keys/{id}/revoke", h.revokeKey)
+
+	r.Get("/api/apis/{id}/writes", h.getWrites)
+	r.With(owner).Put("/api/apis/{id}/writes", h.saveWrites)
+	r.With(owner).Delete("/api/apis/{id}/writes", h.disableWrites)
+	r.With(owner).Get("/api/apis/{id}/writes/log", h.writeLog)
+	r.With(owner).Get("/api/write-grants", h.listGrants)
+	r.With(owner).Post("/api/write-grants", h.createGrant)
+	r.With(owner).Post("/api/write-grants/revoke-principal", h.revokePrincipal)
+	r.With(owner).Post("/api/write-grants/{id}/revoke", h.revokeGrant)
 	return r
+}
+
+// owner refuses everyone but workspace owners: only owners turn writes on and grant them.
+func owner(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if id, _ := auth.FromContext(r.Context()); id.Role != auth.RoleOwner {
+			auth.WriteError(w, http.StatusForbidden, "writes and write grants are managed by workspace owners only")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // writer refuses viewers. Key listing sits behind it too: a viewer can't issue or revoke keys, so
@@ -125,6 +155,10 @@ func (h handlers) regenerate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h handlers) deleteAPI(w http.ResponseWriter, r *http.Request) {
+	if err := h.d.Writes.BeforeDeleteAPI(r.Context(), who(r), chi.URLParam(r, "id")); err != nil {
+		respond(w, r, 0, nil, err)
+		return
+	}
 	err := h.d.APIs.Delete(r.Context(), who(r).Workspace, chi.URLParam(r, "id"))
 	if err == nil {
 		w.WriteHeader(http.StatusNoContent)
@@ -158,6 +192,84 @@ func (h handlers) revokeKey(w http.ResponseWriter, r *http.Request) {
 	respond(w, r, http.StatusOK, k, err)
 }
 
+func (h handlers) getWrites(w http.ResponseWriter, r *http.Request) {
+	v, err := h.d.Writes.Settings(r.Context(), who(r).Workspace, chi.URLParam(r, "id"))
+	respond(w, r, http.StatusOK, v, err)
+}
+
+func (h handlers) saveWrites(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Operations []string `json:"operations"`
+		Columns    []string `json:"columns"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	v, err := h.d.Writes.SaveSettings(r.Context(), who(r), chi.URLParam(r, "id"), in.Operations, in.Columns)
+	respond(w, r, http.StatusOK, v, err)
+}
+
+func (h handlers) disableWrites(w http.ResponseWriter, r *http.Request) {
+	res, err := h.d.Writes.DisableWrites(r.Context(), who(r), chi.URLParam(r, "id"))
+	respond(w, r, http.StatusOK, res, err)
+}
+
+func (h handlers) writeLog(w http.ResponseWriter, r *http.Request) {
+	limit := 100
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 1000 {
+			auth.WriteError(w, http.StatusBadRequest, "limit must be between 1 and 1000")
+			return
+		}
+		limit = n
+	}
+	items, err := h.d.Writes.WriteLog(r.Context(), who(r).Workspace, chi.URLParam(r, "id"), limit)
+	respond(w, r, http.StatusOK, map[string]any{"items": items}, err)
+}
+
+func (h handlers) listGrants(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	items, err := h.d.Writes.Grants(r.Context(), who(r).Workspace, store.GrantFilter{
+		APIID: q.Get("apiId"), Principal: q.Get("principal"), IncludeRevoked: q.Get("includeRevoked") == "true",
+	})
+	respond(w, r, http.StatusOK, map[string]any{"items": items}, err)
+}
+
+func (h handlers) createGrant(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		APIID      string   `json:"apiId"`
+		Principal  string   `json:"principal"`
+		Operations []string `json:"operations"`
+		Columns    []string `json:"columns"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	if in.APIID == "" || in.Principal == "" {
+		auth.WriteError(w, http.StatusBadRequest, "apiId and principal are required")
+		return
+	}
+	g, err := h.d.Writes.Grant(r.Context(), who(r), in.APIID, in.Principal, in.Operations, in.Columns)
+	respond(w, r, http.StatusCreated, g, err)
+}
+
+func (h handlers) revokeGrant(w http.ResponseWriter, r *http.Request) {
+	g, err := h.d.Writes.RevokeGrant(r.Context(), who(r), chi.URLParam(r, "id"))
+	respond(w, r, http.StatusOK, g, err)
+}
+
+func (h handlers) revokePrincipal(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Principal string `json:"principal"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	gs, err := h.d.Writes.RevokePrincipal(r.Context(), who(r), in.Principal)
+	respond(w, r, http.StatusOK, map[string]any{"revoked": len(gs), "items": gs}, err)
+}
+
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody))
 	dec.DisallowUnknownFields()
@@ -177,7 +289,28 @@ func respond(w http.ResponseWriter, r *http.Request, status int, v any, err erro
 		return
 	}
 	var mm *apidef.MismatchError
+	var se *writes.SettingsError
 	switch {
+	case errors.As(err, &se):
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		body := map[string]any{"error": se.Msg}
+		if len(se.Problems) > 0 {
+			body["problems"] = se.Problems
+		}
+		_ = json.NewEncoder(w).Encode(body)
+	case errors.Is(err, writes.ErrRegenerate), errors.Is(err, store.ErrWritesOff), errors.Is(err, writes.ErrDeleteWritable):
+		auth.WriteError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, writes.ErrWriteKeysNotBuilt):
+		auth.WriteError(w, http.StatusUnprocessableEntity, err.Error())
+	case errors.Is(err, writes.ErrBadPrincipal):
+		auth.WriteError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, writes.ErrDataAccessOff):
+		auth.WriteError(w, http.StatusServiceUnavailable, err.Error())
+	case errors.Is(err, broker.ErrRefused):
+		auth.WriteError(w, http.StatusForbidden, "booth-core's credential broker refused the write scope for your role in this workspace")
+	case errors.Is(err, source.ErrOwnerNoAccess) && strings.Contains(r.URL.Path, "/writes"):
+		auth.WriteError(w, http.StatusForbidden, "booth-core won't mint a write token on your access: you need the owner or editor role here and to have signed in within 7 days")
 	case errors.As(err, &mm):
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)

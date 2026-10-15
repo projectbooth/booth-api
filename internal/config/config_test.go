@@ -80,3 +80,28 @@ func TestLoad_OIDC(t *testing.T) {
 		t.Errorf("cfg = %+v, %v", cfg, err)
 	}
 }
+
+func TestLoad_Writes(t *testing.T) {
+	t.Setenv("BOOTH_API_DATABASE_DSN", "postgres://u:p@h/db")
+	cfg, err := Load()
+	if err != nil || cfg.WorkloadIssuerURL != "" || cfg.WriteRate != 10 || cfg.WriteBurst != 50 || cfg.AuditRetention.Hours() != 90*24 {
+		t.Fatalf("write defaults: %+v %v", cfg, err)
+	}
+	t.Setenv("BOOTH_OIDC_WORKLOAD_ISSUER_URL", "http://booth-core:8080")
+	if _, err := Load(); err == nil {
+		t.Error("a workload issuer without a client id was accepted")
+	}
+	t.Setenv("BOOTH_OIDC_ISSUER_URL", "http://keycloak/realms/booth")
+	t.Setenv("BOOTH_OIDC_CLIENT_ID", "booth-design")
+	if cfg, err := Load(); err != nil || cfg.WorkloadIssuerURL != "http://booth-core:8080" {
+		t.Errorf("workload issuer: %+v %v", cfg, err)
+	}
+	for k, v := range map[string]string{"BOOTH_WRITES_RATE": "0", "BOOTH_WRITES_BURST": "x", "BOOTH_WRITES_AUDIT_RETENTION": "-1h"} {
+		t.Run(k, func(t *testing.T) {
+			t.Setenv(k, v)
+			if _, err := Load(); err == nil {
+				t.Errorf("%s=%s accepted", k, v)
+			}
+		})
+	}
+}

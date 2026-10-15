@@ -43,6 +43,14 @@ type Config struct {
 	SidecarDir string
 	// SidecarIdle stops a sidecar unused for this long.
 	SidecarIdle time.Duration
+
+	// App writes (ADR 0117). WorkloadIssuerURL is booth-core's workload issuer, which app tokens on
+	// /app/v1/ are verified against; empty leaves the app write routes answering 503. The rest are
+	// the write limits: per-principal rate and burst, and how long the write audit log is kept.
+	WorkloadIssuerURL string
+	WriteRate         float64
+	WriteBurst        int
+	AuditRetention    time.Duration
 }
 
 // DataAccess reports whether the workspace data path is configured.
@@ -80,6 +88,19 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("BOOTH_SIDECAR_IDLE must be a positive duration")
 	}
 	cfg.SidecarIdle = idle
+	cfg.WorkloadIssuerURL = os.Getenv("BOOTH_OIDC_WORKLOAD_ISSUER_URL")
+	if cfg.WriteRate, err = strconv.ParseFloat(getEnv("BOOTH_WRITES_RATE", "10"), 64); err != nil || cfg.WriteRate <= 0 {
+		return Config{}, fmt.Errorf("BOOTH_WRITES_RATE must be a positive number of writes per second")
+	}
+	if cfg.WriteBurst, err = strconv.Atoi(getEnv("BOOTH_WRITES_BURST", "50")); err != nil || cfg.WriteBurst < 1 {
+		return Config{}, fmt.Errorf("BOOTH_WRITES_BURST must be a positive integer")
+	}
+	if cfg.AuditRetention, err = time.ParseDuration(getEnv("BOOTH_WRITES_AUDIT_RETENTION", "2160h")); err != nil || cfg.AuditRetention <= 0 {
+		return Config{}, fmt.Errorf("BOOTH_WRITES_AUDIT_RETENTION must be a positive duration (default 2160h, 90 days)")
+	}
+	if cfg.WorkloadIssuerURL != "" && cfg.OIDC.ClientID == "" {
+		return Config{}, fmt.Errorf("BOOTH_OIDC_WORKLOAD_ISSUER_URL needs BOOTH_OIDC_CLIENT_ID: core's workload tokens carry the same audience as a person's")
+	}
 	if (cfg.MintURL == "") != (cfg.MintCredential == "") {
 		return Config{}, fmt.Errorf("BOOTH_WORKLOAD_MINT_URL and BOOTH_WORKLOAD_MINT_CREDENTIAL must be set together")
 	}

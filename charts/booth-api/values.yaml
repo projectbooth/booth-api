@@ -1,7 +1,8 @@
 # Default values for booth-api.
 #
-# What this module is (ADR 0100): turns a catalog dataset into a read-only REST + GraphQL API,
-# reachable by holders of an API key this module issues, hashes, scopes to datasets and revokes.
+# What this module is (ADR 0100): turns a catalog dataset into a REST + GraphQL API, readable by
+# holders of an API key this module issues, hashes, scopes to datasets and revokes, and writable by
+# booth-streamlit apps a workspace owner grants (ADR 0117; docs/contracts/app-writes.md).
 #
 # The management API behind the module's UI (generate APIs, issue and revoke keys) and the
 # generated endpoints on core's public route (ADR 0101). Reading workspace data (ADR 0103) needs
@@ -30,6 +31,10 @@ oidc:
   # is still checked exactly against issuerUrl. The bundled install points it at Keycloak's
   # in-cluster Service over plain http. Empty (default): discovery. Requires issuerUrl.
   jwksUrl: ""
+  # ADR 0117: booth-core's workload issuer (its in-cluster URL, the `iss` of the tokens it mints).
+  # App write tokens on /app/v1/ are verified against it, never against issuerUrl. Empty: app
+  # writes answer 503. Requires clientId. Core's install API fills it (identity keys, ADR 0113).
+  workloadIssuerUrl: ""
 
 core:
   # booth-core's in-cluster base URL, e.g. http://booth-core.booth-system.svc.cluster.local:8080.
@@ -40,8 +45,15 @@ core:
 
 dataAccess:
   # A workspace's credential sidecar is stopped after this long with no request (it starts again
-  # on the next one, which then waits a few seconds for a lease).
+  # on the next one, which then waits a few seconds for a lease). Write sidecars too.
   idle: 10m
+
+writes:
+  # ADR 0117: per-app write rate limit (a token bucket per app, per pod) and how long the write
+  # audit log (who wrote what, when; never row values) is kept.
+  ratePerSecond: 10
+  burst: 50
+  auditRetention: 2160h # 90 days
 
 podSecurityContext:
   runAsNonRoot: true

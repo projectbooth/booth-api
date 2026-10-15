@@ -21,6 +21,7 @@ import (
 	"github.com/projectbooth/booth-api/internal/keys"
 	"github.com/projectbooth/booth-api/internal/source"
 	"github.com/projectbooth/booth-api/internal/store"
+	"github.com/projectbooth/booth-api/internal/writes"
 )
 
 // fixturePools stands in for the per-workspace sidecar pools (ADR 0103), which aren't built: every
@@ -85,6 +86,7 @@ func newEnv(t *testing.T, pools source.Pools) *env {
 		Verifier: func() auth.TokenVerifier { return v },
 		APIs:     apis.Service{Catalog: &catalog.Client{CoreURL: cat.URL}, Store: st, Pools: pools},
 		Keys:     e.keys,
+		Writes:   writes.Service{Store: st},
 	})
 	return e
 }

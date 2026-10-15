@@ -348,7 +348,8 @@ func valueAtPath(root map[string]any, dotted string) (any, bool) {
 
 // TestChart_IdentityKeysAnnotation (ADR 0113): Chart.yaml carries the annotation, it is valid JSON
 // naming only shared settings, every path it maps exists with a default in values.yaml, and it maps
-// exactly booth-api's five settings (no workload or iframe issuer: booth-api verifies neither).
+// exactly booth-api's six settings (the workload issuer since ADR 0117: app write tokens are verified
+// against it; no iframe issuer: booth-api has no iframe-proxied UI).
 func TestChart_IdentityKeysAnnotation(t *testing.T) {
 	raw, values := readIdentityKeys(t)
 	mapping, problems := checkIdentityKeys(raw, values)
@@ -358,7 +359,7 @@ func TestChart_IdentityKeysAnnotation(t *testing.T) {
 	want := map[string]string{
 		"issuerUrl": "oidc.issuerUrl", "clientId": "oidc.clientId",
 		"jwksUrl": "oidc.jwksUrl", "groupsClaim": "oidc.groupsClaim",
-		"coreUrl": "core.url",
+		"coreUrl": "core.url", "workloadIssuerUrl": "oidc.workloadIssuerUrl",
 	}
 	if fmt.Sprint(mapping) != fmt.Sprint(want) {
 		t.Errorf("%s = %v, want %v", identityKeysAnnotation, mapping, want)
@@ -441,4 +442,31 @@ func readIdentityKeys(t *testing.T) (string, map[string]any) {
 		t.Fatalf("parsing values.yaml: %v", err)
 	}
 	return raw, values
+}
+
+// ADR 0117: the workload issuer reaches the pod only when set (the identity-keys annotation maps it,
+// so core's install API sets it), and the write limits always render with the documented defaults.
+func TestChart_Writes(t *testing.T) {
+	requireHelm(t)
+	off := string(helmTemplate(t))
+	if strings.Contains(off, "BOOTH_OIDC_WORKLOAD_ISSUER_URL") {
+		t.Error("BOOTH_OIDC_WORKLOAD_ISSUER_URL rendered by default")
+	}
+	for _, want := range []string{
+		"- name: BOOTH_WRITES_RATE\n              value: \"10\"",
+		"- name: BOOTH_WRITES_BURST\n              value: \"50\"",
+		"- name: BOOTH_WRITES_AUDIT_RETENTION\n              value: \"2160h\"",
+	} {
+		if !strings.Contains(off, want) {
+			t.Errorf("default render lacks %q", want)
+		}
+	}
+	raw, values := readIdentityKeys(t)
+	mapping, _ := checkIdentityKeys(raw, values)
+	const issuer = "http://booth-core.booth-system.svc:8080"
+	on := string(helmTemplate(t, "--set", "oidc.issuerUrl=https://idp.example/realms/booth", "--set", "oidc.clientId=booth-design",
+		"--set", mapping["workloadIssuerUrl"]+"="+issuer))
+	if !strings.Contains(on, "- name: BOOTH_OIDC_WORKLOAD_ISSUER_URL\n              value: \""+issuer+"\"") {
+		t.Error("the annotation's workloadIssuerUrl path doesn't reach BOOTH_OIDC_WORKLOAD_ISSUER_URL")
+	}
 }
