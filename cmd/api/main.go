@@ -26,6 +26,7 @@ import (
 	"github.com/projectbooth/booth-api/internal/broker"
 	"github.com/projectbooth/booth-api/internal/catalog"
 	"github.com/projectbooth/booth-api/internal/config"
+	"github.com/projectbooth/booth-api/internal/events"
 	"github.com/projectbooth/booth-api/internal/gql"
 	"github.com/projectbooth/booth-api/internal/keys"
 	"github.com/projectbooth/booth-api/internal/public"
@@ -63,10 +64,23 @@ func run() error {
 		return fmt.Errorf("parsing database DSN: %w", err)
 	}
 	defer pool.Close()
+	st := store.New(pool)
+	// ADR 0123: api.write.committed events. A committed write queues its event in the outbox with its
+	// audit entry; the relay publishes from there once the bus is up (it connects, and reconnects,
+	// in the background), so an outage or a restart delays events rather than losing them.
+	bus := events.New(events.Config{URL: cfg.NATSURL, CredentialsFile: cfg.NATSCredsFile})
+	go bus.Run(ctx)
+	var relay *events.Relay
+	if cfg.NATSURL != "" {
+		relay = events.NewRelay(st, bus)
+	}
 	var ready atomic.Bool
 	go retry(ctx, "applying migrations", 3*time.Second, func() error { return store.Migrate(ctx, pool) }, func() {
 		ready.Store(true)
 		log.Print("migrations applied; ready")
+		if relay != nil {
+			go relay.Run(ctx)
+		}
 	})
 
 	// The management API's verifier is built in the background, retrying OIDC discovery; until it
@@ -87,7 +101,6 @@ func run() error {
 		log.Print("WARNING: BOOTH_CORE_URL is not set; generating an API will fail, since the catalog is reached through core's gateway.")
 	}
 
-	st := store.New(pool)
 	// Workspace data (ADR 0103): one credential-sidecar process per workspace and key creator,
 	// under a workload token core mints for that creator. Without the minting Secret, data requests
 	// and API generation answer 503; keys, scope and the schema documents still work.
@@ -97,6 +110,9 @@ func run() error {
 	ws := writes.Service{
 		Store: st, Limiter: ratelimit.New(cfg.WriteRate, cfg.WriteBurst),
 		Timeout: table.DefaultLimits.StatementTimeout, IdempotencyTTL: writes.DefaultIdempotencyTTL,
+	}
+	if relay != nil {
+		ws.Events, ws.WakeRelay = true, relay.Wake
 	}
 	if cfg.DataAccess() {
 		minter := &workload.Minter{URL: cfg.MintURL, Credential: cfg.MintCredential}
