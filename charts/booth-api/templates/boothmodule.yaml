@@ -4,6 +4,9 @@
 # generate its API, issue and revoke keys, and (owners) turn writes on (ADR 0117). UI package:
 # @projectbooth/api-ui (web/).
 #
+# ADR 0123: `events: {publish: [api.write.committed]}` (with eventBus.enabled) gets this module a bus
+# credential that may publish exactly that event type, in any workspace, and nothing else.
+#
 # App writes (ADR 0117) need no manifest field: an app's Streamlit gate reaches
 # /modules/api/app/v1/... through core's ordinary gateway with the app's own workload token, and
 # booth-api verifies that token against core's workload issuer (oidc.workloadIssuerUrl).
@@ -49,6 +52,11 @@ spec:
   # kind to this module's id (booth-core v0.3.5).
   workloadIdentity:
     mint: true
+  {{- end }}
+  {{- if .Values.eventBus.enabled }}
+  events:
+    publish:
+      - api.write.committed
   {{- end }}
   serviceRef:
     name: {{ include "booth-api.fullname" . }}

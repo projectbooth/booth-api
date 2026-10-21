@@ -32,6 +32,7 @@ import (
 	"github.com/projectbooth/booth-api/internal/appauth"
 	"github.com/projectbooth/booth-api/internal/auth"
 	"github.com/projectbooth/booth-api/internal/broker"
+	"github.com/projectbooth/booth-api/internal/events"
 	"github.com/projectbooth/booth-api/internal/sidecars"
 	"github.com/projectbooth/booth-api/internal/source"
 	"github.com/projectbooth/booth-api/internal/store"
@@ -85,9 +86,9 @@ type Store interface {
 	RevokePrincipal(ctx context.Context, workspace, principal, by string) ([]store.Grant, error)
 	HasLiveGrantsBy(ctx context.Context, apiID, owner string) (bool, error)
 	ClaimIdempotencyKey(ctx context.Context, apiID, principal, key, hash string, ttl time.Duration) (store.Idempotent, bool, error)
-	FinishIdempotencyKey(ctx context.Context, apiID, principal, key string, response json.RawMessage) error
 	ReleaseIdempotencyKey(ctx context.Context, apiID, principal, key string) error
 	LogWrite(ctx context.Context, e store.WriteLogEntry) error
+	RecordWrite(ctx context.Context, e store.WriteLogEntry, idem *store.IdempotencyResult, ev *store.OutboxEvent) error
 	LogAdmin(ctx context.Context, workspace, apiID, actor, action string, detail any) error
 	WriteLog(ctx context.Context, workspace, apiID string, limit int) ([]store.WriteLogRecord, error)
 }
@@ -125,6 +126,10 @@ type Service struct {
 	Timeout        time.Duration
 	IdempotencyTTL time.Duration
 	Now            func() time.Time
+	// Events turns on api.write.committed (ADR 0123): each committed write queues its event in
+	// the outbox, recorded with the write, and then calls WakeRelay (if set) to publish it.
+	Events    bool
+	WakeRelay func()
 }
 
 func (s Service) dataAccess() bool { return s.Pools != nil && s.Minter != nil && s.Broker != nil }
@@ -568,10 +573,15 @@ func (s Service) Execute(ctx context.Context, t Target, w AppWrite) (out Outcome
 	start := s.now()
 	entry := store.WriteLogEntry{Workspace: t.Def.Workspace, APIID: t.Def.ID, Operation: w.Request.Op, Principal: w.Caller.Subject,
 		GrantedBy: t.Grant.GrantedBy, ReportedUser: w.ReportedUser, IdempotencyKey: w.IdempotencyKey}
+	// committed: the write's transaction committed. Only then are the idempotency key's result and
+	// the event recorded, with the audit entry; a replay, a refusal or an unknown outcome has none.
+	committed := false
 	defer func() {
 		entry.Duration = s.now().Sub(start)
 		entry.Status, entry.Outcome = outcomeOf(out, err)
-		if lerr := s.Store.LogWrite(context.WithoutCancel(ctx), entry); lerr != nil {
+		if committed {
+			s.recordCommitted(ctx, t, w, entry, out)
+		} else if lerr := s.Store.LogWrite(context.WithoutCancel(ctx), entry); lerr != nil {
 			log.Printf("writes: audit log for API %s: %v", t.Def.ID, lerr)
 		}
 		// Row values are never logged: the line names the API, the operation, the app and the result.
@@ -606,10 +616,7 @@ func (s Service) Execute(ctx context.Context, t Target, w AppWrite) (out Outcome
 			bg := context.WithoutCancel(ctx)
 			switch {
 			case err == nil:
-				b, _ := json.Marshal(out)
-				if ferr := s.Store.FinishIdempotencyKey(bg, t.Def.ID, w.Caller.Subject, w.IdempotencyKey, b); ferr != nil {
-					log.Printf("writes: recording idempotency key for API %s: %v", t.Def.ID, ferr)
-				}
+				// Recorded with the audit entry (recordCommitted).
 			case errors.Is(err, table.ErrOutcomeUnknown):
 				// Leave it pending: a retry with this key answers idempotency_outcome_unknown
 				// rather than risk writing the row twice.
@@ -625,6 +632,7 @@ func (s Service) Execute(ctx context.Context, t Target, w AppWrite) (out Outcome
 	if err != nil {
 		return Outcome{}, err
 	}
+	committed = true
 	if len(res.KeyText) > 0 {
 		sum := sha256.Sum256([]byte(strings.Join(res.KeyText, "\x00")))
 		entry.RowKeyHash = hex.EncodeToString(sum[:])
@@ -634,6 +642,38 @@ func (s Service) Execute(ctx context.Context, t Target, w AppWrite) (out Outcome
 		status = 201
 	}
 	return Outcome{Status: status, Row: res.Row, Version: res.Version}, nil
+}
+
+// recordCommitted records a committed write in one store transaction: its audit entry, its
+// idempotency key's result and, with events on, its api.write.committed event (ADR 0123). If that
+// fails, the audit entry is recorded alone: the key stays pending (a retry with it answers
+// idempotency_outcome_unknown) and the event is lost, which a pipeline's slow safety-net trigger
+// covers.
+func (s Service) recordCommitted(ctx context.Context, t Target, w AppWrite, entry store.WriteLogEntry, out Outcome) {
+	bg := context.WithoutCancel(ctx)
+	var idem *store.IdempotencyResult
+	if w.IdempotencyKey != "" {
+		b, _ := json.Marshal(out)
+		idem = &store.IdempotencyResult{APIID: t.Def.ID, Principal: w.Caller.Subject, Key: w.IdempotencyKey, Response: b}
+	}
+	var ev *store.OutboxEvent
+	if s.Events {
+		data, _ := json.Marshal(events.WriteCommittedData{
+			APISlug: t.Def.Slug, Dataset: t.Def.DatasetID, Table: t.Def.Table.Schema + "." + t.Def.Table.Name,
+			Operation: w.Request.Op, Rows: 1, Principal: w.Caller.Subject,
+		})
+		ev = &store.OutboxEvent{Workspace: t.Def.Workspace, EventType: events.WriteCommitted, Data: data}
+	}
+	if err := s.Store.RecordWrite(bg, entry, idem, ev); err != nil {
+		log.Printf("writes: recording a committed write to API %s: %v; recording its audit entry alone (its idempotency key stays pending and its event is lost)", t.Def.ID, err)
+		if lerr := s.Store.LogWrite(bg, entry); lerr != nil {
+			log.Printf("writes: audit log for API %s: %v", t.Def.ID, lerr)
+		}
+		return
+	}
+	if ev != nil && s.WakeRelay != nil {
+		s.WakeRelay()
+	}
 }
 
 // write runs the statement on the granting owner's write sidecar. On SQLSTATE 42501 it reissues

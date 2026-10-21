@@ -6,7 +6,9 @@
 # gateway, workspace data through core's broker, booth-database's provider and booth-core's real
 # credential sidecar, and keys are used on core's real public route. App writes (ADR 0117) use a
 # real app workload token: a stand-in `streamlit` BoothModule gets core's minting credential, and
-# the check mints `streamlit:acme:<app>` tokens with it exactly as booth-streamlit does.
+# the check mints `streamlit:acme:<app>` tokens with it exactly as booth-streamlit does. The same
+# stand-in declares `events.subscribe: [api.write.committed]`, so core gives the check a real
+# subscriber credential to read the events booth-api publishes (ADR 0123).
 #
 #   CORE_DIR=../booth-core DATABASE_DIR=../booth-database CATALOG_DIR=../booth-catalog \
 #     bash hack/realstack-integration.sh
@@ -121,20 +123,22 @@ helm upgrade --install booth-catalog "$CATALOG_DIR/charts/booth-catalog" -n boot
   --set nats.url=nats://booth-core-nats.booth-system.svc:4222 --set postgres.dsnSecret.name=catalog-db \
   --set image.repository=booth-catalog --set image.tag=rs --set image.pullPolicy=Never --wait --timeout 10m >/dev/null
 
-echo "--- booth-api (data access on: core.url set)"
+echo "--- booth-api (data access on: core.url set; api.write.committed on core's bus, credential from core)"
 kubectl create namespace booth-api --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 helm upgrade --install a charts/booth-api -n booth-api \
   --set core.url=$CORE_URL --set oidc.issuerUrl=$ISSUER --set oidc.clientId=booth-design \
   --set oidc.workloadIssuerUrl=$CORE_URL \
   --set image.repository=booth-api --set image.tag=rs --set image.pullPolicy=Never --wait --timeout 10m >/dev/null
-kubectl get boothmodule -A -o custom-columns=NS:.metadata.namespace,ID:.spec.id,PUBLIC:.spec.publicRoutes.pathPrefixes,MINT:.spec.workloadIdentity.mint
+kubectl get boothmodule -A -o custom-columns=NS:.metadata.namespace,ID:.spec.id,PUBLIC:.spec.publicRoutes.pathPrefixes,MINT:.spec.workloadIdentity.mint,PUBLISH:.spec.events.publish
 
 echo "--- check (in-cluster, in a namespace booth-database's NetworkPolicy admits, to seed tables)"
 kubectl create namespace realstack-check --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl label namespace realstack-check booth.projectbooth.io/database-client=true --overwrite >/dev/null
 # A stand-in for booth-streamlit's manifest (id streamlit, workloadIdentity.mint): core delivers its
 # minting credential into this namespace, so the check mints real app tokens
-# (streamlit:<workspace>:<appId>, roleCeiling viewer) the way booth-streamlit does. Nothing serves it.
+# (streamlit:<workspace>:<appId>, roleCeiling viewer) the way booth-streamlit does, and its event-bus
+# credential (subscribe api.write.committed), with which the check reads booth-api's events. Nothing
+# serves it.
 kubectl apply -f - >/dev/null <<EOF
 apiVersion: booth.projectbooth.io/v1alpha1
 kind: BoothModule
@@ -147,13 +151,16 @@ spec:
   hasOwnUi: false
   healthCheckPath: /healthz
   workloadIdentity: {mint: true}
+  events: {subscribe: [api.write.committed]}
   serviceRef: {name: streamlit-stand-in, port: 8080}
 EOF
-for _ in $(seq 60); do
-  kubectl -n realstack-check get secret booth-workload-minting-credentials >/dev/null 2>&1 && break
-  sleep 2
+for s in booth-workload-minting-credentials booth-event-bus-credentials; do
+  for _ in $(seq 60); do
+    kubectl -n realstack-check get secret "$s" >/dev/null 2>&1 && break
+    sleep 2
+  done
+  kubectl -n realstack-check get secret "$s" >/dev/null
 done
-kubectl -n realstack-check get secret booth-workload-minting-credentials >/dev/null
 kubectl -n realstack-check delete job check --ignore-not-found >/dev/null
 kubectl -n realstack-check apply -f - >/dev/null <<EOF
 apiVersion: batch/v1
@@ -175,6 +182,14 @@ spec:
               valueFrom: {secretKeyRef: {name: booth-workload-minting-credentials, key: url}}
             - name: STREAMLIT_MINT_CREDENTIAL
               valueFrom: {secretKeyRef: {name: booth-workload-minting-credentials, key: credential}}
+            - name: STREAMLIT_NATS_URL
+              valueFrom: {secretKeyRef: {name: booth-event-bus-credentials, key: url}}
+            - {name: STREAMLIT_NATS_CREDS, value: /etc/booth/event-bus/nats.creds}
+          volumeMounts:
+            - {name: event-bus, mountPath: /etc/booth/event-bus, readOnly: true}
+      volumes:
+        - name: event-bus
+          secret: {secretName: booth-event-bus-credentials, items: [{key: nats.creds, path: nats.creds}]}
 EOF
 if ! kubectl -n realstack-check wait --for=condition=complete job/check --timeout=600s; then
   kubectl -n realstack-check logs job/check || true
@@ -184,11 +199,13 @@ fi
 kubectl -n realstack-check logs job/check
 echo "--- booth-api's own log (sidecar lifecycle)"
 API_LOG=$(kubectl -n booth-api logs deploy/a-booth-api)
-echo "$API_LOG" | grep -E "sidecars?:|data access|writes:" | head -60
+echo "$API_LOG" | grep -E "sidecars?:|data access|writes:|event bus|events:" | head -60
 # ADR 0117: the write sidecars really ran, revoking stopped one, turning writes off stopped the
 # rest, and no row value the check wrote ever reached booth-api's log.
 echo "$API_LOG" | grep -q "started write sidecar for API" || { echo "FAIL: no write sidecar started"; exit 1; }
 echo "$API_LOG" | grep -q "stopped write sidecar for API .*(grant revoked)" || { echo "FAIL: revoking a grant didn't stop its write sidecar"; exit 1; }
 echo "$API_LOG" | grep -q "stopped write sidecar for API .*(writes turned off)" || { echo "FAIL: turning writes off didn't stop the write sidecars"; exit 1; }
 if echo "$API_LOG" | grep -q "rs-row-value"; then echo "FAIL: a row value reached booth-api's log"; exit 1; fi
+# ADR 0123: booth-api connected to core's bus with the credential core minted for its manifest.
+echo "$API_LOG" | grep -q "event bus connected" || { echo "FAIL: booth-api never connected to the event bus"; exit 1; }
 echo "realstack integration: OK"

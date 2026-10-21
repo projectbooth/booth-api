@@ -7,11 +7,14 @@ it's running is in the README ("Using a generated API").
 
 - **booth-core**, **booth-catalog** and **booth-database** installed. booth-database's credential
   broker provider is on by default; it's how booth-api reads workspace tables.
-- booth-core provisions two Secrets into booth-api's namespace. **You don't create either one.**
+- booth-core provisions these Secrets into booth-api's namespace. **You don't create any of them.**
   - `booth-database-credentials` (`dsn`): booth-api's own database, for keys and API definitions.
     Core writes it because the manifest declares `database: {enabled: true}` (ADR 0053).
   - `booth-workload-minting-credentials` (`url`, `credential`): written once `core.url` is set
     (below), because the manifest then declares `workloadIdentity: {mint: true}` (ADR 0103).
+  - `booth-event-bus-credentials` (`url`, `nats.creds`): written because the manifest declares
+    `events: {publish: [api.write.committed]}` (ADR 0123). Core also labels the namespace so that
+    NATS admits it.
 
   Until core has written a Secret, the pod waits in `CreateContainerConfigError`. That's normal
   for a minute after install. If it lasts, check that booth-core's controller sees the
@@ -29,6 +32,7 @@ it's running is in the README ("Using a generated API").
 | `oidc.workloadIssuerUrl` | booth-core's workload issuer, its in-cluster URL (the same value as core's `workloadIdentity.issuerUrl`, e.g. `http://booth-core.booth-system.svc:8080`). Core's install API fills it (identity keys). | App writes (`/modules/api/app/v1/...`, ADR 0117) answer 503. Reads and keys are unaffected. |
 | `writes.ratePerSecond`, `writes.burst` | Per-app write rate limit, per pod (default 10/s, burst 50) | Defaults apply. |
 | `writes.auditRetention` | How long the write audit log is kept (default `2160h`, 90 days) | Defaults apply. |
+| `eventBus.enabled` | `true` (default): publish `api.write.committed` for pipeline event triggers (ADR 0123) | `false`: no `events` on the manifest, no bus credential, no connection. Writes still work; no pipeline is triggered by them. |
 
 **`oidc.jwksUrl` (ADR 0108).** When set, booth-api fetches the provider's signing keys directly from
 this URL and never contacts the issuer's discovery document. Tokens are still accepted only if their
@@ -86,6 +90,38 @@ helm upgrade --install booth-api charts/booth-api -n booth-api --create-namespac
 - Existing APIs keep working.
 - Each API must be regenerated once before writes can be turned on, because its snapshot predates
   the column flags writes need.
+
+## Write events (ADR 0123)
+
+Each committed app write publishes `api.write.committed` on booth-core's bus, for booth-pipeline's
+event triggers. The contract is `docs/contracts/events.md`.
+
+**How events are sent:**
+- The event is recorded in booth-api's own database (`event_outbox`), with the write's audit entry,
+  and published from there.
+- **If the bus is down,** writes still work and events wait. They are published when the bus is
+  back, and dropped after 24 hours.
+- Events never carry row values, keys, users or the granting owner.
+
+**In the log:**
+- `event bus connected` / `event bus disconnected: …` / `event bus reconnected`.
+- `events: publishing from the outbox (N sent first): …` while the bus refuses events.
+- `events: dropped N undelivered event(s) older than 24h0m0s from the outbox`. **When you see
+  this**, a pipeline that relies only on its event trigger may have missed a write. Its slow
+  interval or cron trigger, if it has one, covers that.
+- `BOOTH_NATS_URL is not set: api.write.committed events are off …` with `eventBus.enabled=false`.
+
+**To see what is waiting** (on core's bundled PostgreSQL, release `booth-core`):
+
+```sh
+kubectl -n booth-system exec booth-core-postgresql-0 -- \
+  psql -U postgres -d booth_mod_api -c "select count(*), min(created_at) from event_outbox"
+```
+
+**Upgrading from 0.1.4 or earlier:**
+- Migration 0004 creates `event_outbox` at start.
+- The pod waits in `ContainerCreating` until core has written `booth-event-bus-credentials`. That
+  takes a few seconds after the upgrade changes the manifest.
 
 ## The sidecar processes
 

@@ -55,6 +55,30 @@ writes:
   burst: 50
   auditRetention: 2160h # 90 days
 
+# ADR 0123: booth-api publishes api.write.committed on the event bus (NATS, ADR 0021), one per
+# committed app write, so a pipeline can be triggered by it. The event names the API, its dataset
+# and table, the operation and the app; never row values. The BoothModule declares
+# `events: {publish: [api.write.committed]}`, and booth-core answers by writing the
+# booth-event-bus-credentials Secret (a credential scoped to exactly that, plus the bus's in-cluster
+# URL) into this namespace and admitting the namespace to NATS. The pod mounts it and waits until it
+# exists, as booth-database does. Events wait in booth-api's own database while the bus is down, and
+# are dropped after 24 hours undelivered.
+eventBus:
+  # false leaves the bus out entirely: no `events` on the manifest, no credential, no connection.
+  # Writes still work; no pipeline is triggered by them.
+  enabled: true
+  credentialsSecret:
+    # Read the credential from booth-core's Secret (the normal case). Set false only against a bus
+    # with authentication off (a test stand-in), and then nats.url is required.
+    enabled: true
+    # The name booth-core gives it (ADR 0050).
+    name: booth-event-bus-credentials
+
+nats:
+  # Overrides the bus URL from the credentials Secret. Required only when
+  # eventBus.credentialsSecret.enabled is false.
+  url: ""
+
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 65532

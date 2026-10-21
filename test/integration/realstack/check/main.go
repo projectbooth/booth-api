@@ -16,7 +16,9 @@
 //     workload token (minted with a stand-in streamlit module's credential); owners only; app tokens
 //     only write; the table-scoped lease can't touch another table or run DDL; removing the granting
 //     owner stops writes at the next mint; revoking stops writes (booth-streamlit's grants service
-//     token may revoke an app's grants and nothing else); turning writes off ends the lease.
+//     token may revoke an app's grants and nothing else); turning writes off ends the lease. Each
+//     committed write, and nothing else, reached core's event bus as api.write.committed (ADR 0123),
+//     read with the stand-in module's own subscriber credential.
 //
 // Every step prints what it checked; the first failure exits non-zero with what was expected and
 // what came back.
@@ -36,12 +38,16 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 var (
 	coreURL     = env("CORE_URL", "http://booth-core.booth-system.svc:8080")
 	mintURL     = os.Getenv("STREAMLIT_MINT_URL")
 	mintCred    = os.Getenv("STREAMLIT_MINT_CREDENTIAL")
+	natsURL     = os.Getenv("STREAMLIT_NATS_URL")
+	natsCreds   = os.Getenv("STREAMLIT_NATS_CREDS")
 	keycloakURL = env("KEYCLOAK_URL", "http://keycloak.keycloak.svc:8080")
 	password    = os.Getenv("TEST_PASSWORD")
 	adminPass   = os.Getenv("KEYCLOAK_ADMIN_PASSWORD")
@@ -52,6 +58,8 @@ func main() {
 	ctx := context.Background()
 	must(password != "" && adminPass != "", "TEST_PASSWORD and KEYCLOAK_ADMIN_PASSWORD are required")
 	must(mintURL != "" && mintCred != "", "STREAMLIT_MINT_URL and STREAMLIT_MINT_CREDENTIAL are required (the stand-in streamlit module's minting Secret)")
+	must(natsURL != "" && natsCreds != "", "STREAMLIT_NATS_URL and STREAMLIT_NATS_CREDS are required (the stand-in streamlit module's event-bus Secret)")
+	started := time.Now().Add(-time.Minute)
 
 	step("1. sign in, and let core record each person's roles")
 	alice, bob, dave, carol, erin := login("alice"), login("bob"), login("dave"), login("carol"), login("erin")
@@ -287,6 +295,31 @@ func main() {
 	must(err != nil, "the tablewrite lease still connects after writes were turned off")
 	fmt.Println("ok   the grant's lease no longer connects after the revoke request")
 
+	step("8f. every committed write, and nothing else, reached the event bus as api.write.committed (ADR 0123)")
+	// Committed through booth-api above: budget's insert, update, GraphQL insert, forged-header
+	// insert, insert after erin lost access and insert after the second grant; the other app's
+	// insert. Not: the replay, every refusal, and the lease's own insert in 8c (straight to
+	// PostgreSQL, which ADR 0123 doesn't cover).
+	evs := writeEvents(started, 7)
+	ops, principals := map[string]int{}, map[string]int{}
+	for _, ev := range evs {
+		must(ev.Subject == "booth.acme.api.write.committed" && ev.Workspace == "acme" && ev.EventType == "api.write.committed" && ev.PublishedBy == "api",
+			"event = %+v", ev)
+		must(strings.HasPrefix(ev.MsgID, "api-"), "message id = %q", ev.MsgID)
+		d := ev.Data
+		must(len(d) == 6 && d["apiSlug"] == wslug && d["dataset"] == entries && d["table"] == "finance_input.entries" && d["rows"] == float64(1),
+			"data = %v (exactly apiSlug, dataset, table, operation, rows, principal)", d)
+		ops[fmt.Sprint(d["operation"])]++
+		principals[fmt.Sprint(d["principal"])]++
+	}
+	must(ops["insert"] == 6 && ops["update"] == 1, "operations = %v, want 6 inserts and 1 update", ops)
+	must(principals["streamlit:acme:budget"] == 6 && principals["streamlit:acme:other"] == 1, "principals = %v", principals)
+	raw := mustJSON(evs)
+	for _, v := range []string{"rs-row-value", "sam", "rs-k1", aliceSub, "household"} {
+		must(!strings.Contains(raw, v), "an event holds %q: %s", v, raw)
+	}
+	fmt.Printf("ok   %d events, one per committed write: %v, %v; no row values, users or keys\n", len(evs), ops, principals)
+
 	fmt.Println("\nreal-stack check: OK")
 }
 
@@ -298,6 +331,51 @@ type response struct {
 }
 
 func step(s string) { fmt.Println("\n--- " + s) }
+
+type busEvent struct {
+	Subject     string `json:"-"`
+	MsgID       string `json:"-"`
+	Workspace   string
+	EventType   string
+	PublishedBy string
+	Data        map[string]any
+}
+
+// writeEvents reads every api.write.committed stored since the check started, with the stand-in
+// module's subscriber credential, waiting until want have arrived and then a little longer so that
+// an extra one would be seen too.
+func writeEvents(since time.Time, want int) []busEvent {
+	nc, err := nats.Connect(natsURL, nats.UserCredentials(natsCreds))
+	must(err == nil, "connecting to the event bus with the stand-in's credential: %v", err)
+	defer nc.Close()
+	js, err := jetstream.New(nc)
+	must(err == nil, "jetstream: %v", err)
+	ctx := context.Background()
+	stream, err := js.Stream(ctx, "BOOTH_EVENTS")
+	must(err == nil, "the BOOTH_EVENTS stream: %v", err)
+	cons, err := stream.OrderedConsumer(ctx, jetstream.OrderedConsumerConfig{
+		FilterSubjects: []string{"booth.*.api.write.committed"}, DeliverPolicy: jetstream.DeliverByStartTimePolicy, OptStartTime: &since,
+	})
+	must(err == nil, "an ordered consumer on api.write.committed: %v", err)
+	var out []busEvent
+	deadline := time.Now().Add(60 * time.Second)
+	settle := time.Time{}
+	for time.Now().Before(deadline) && (settle.IsZero() || time.Now().Before(settle)) {
+		batch, err := cons.Fetch(50, jetstream.FetchMaxWait(time.Second))
+		must(err == nil, "fetching events: %v", err)
+		for m := range batch.Messages() {
+			var ev busEvent
+			must(json.Unmarshal(m.Data(), &ev) == nil, "event %s isn't JSON", m.Data())
+			ev.Subject, ev.MsgID = m.Subject(), m.Headers().Get(nats.MsgIdHdr)
+			out = append(out, ev)
+		}
+		if len(out) >= want && settle.IsZero() {
+			settle = time.Now().Add(5 * time.Second)
+		}
+	}
+	must(len(out) == want, "%d api.write.committed events, want %d: %s", len(out), want, mustJSON(out))
+	return out
+}
 
 func env(k, d string) string {
 	if v := os.Getenv(k); v != "" {

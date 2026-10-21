@@ -105,3 +105,19 @@ func TestLoad_Writes(t *testing.T) {
 		})
 	}
 }
+
+// ADR 0123: no bus URL leaves events off; a credentials file needs a URL to use it on.
+func TestLoad_EventBus(t *testing.T) {
+	t.Setenv("BOOTH_API_DATABASE_DSN", "postgres://u:p@h/db")
+	if cfg, err := Load(); err != nil || cfg.NATSURL != "" {
+		t.Fatalf("defaults: %+v %v", cfg, err)
+	}
+	t.Setenv("BOOTH_NATS_CREDS_FILE", "/etc/booth/event-bus/nats.creds")
+	if _, err := Load(); err == nil {
+		t.Error("a credentials file without a bus URL was accepted")
+	}
+	t.Setenv("BOOTH_NATS_URL", "nats://booth-core-nats.booth-system.svc:4222")
+	if cfg, err := Load(); err != nil || cfg.NATSURL == "" || cfg.NATSCredsFile == "" {
+		t.Errorf("configured: %+v %v", cfg, err)
+	}
+}

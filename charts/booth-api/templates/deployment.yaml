@@ -84,6 +84,28 @@ spec:
               value: {{ .Values.writes.burst | quote }}
             - name: BOOTH_WRITES_AUDIT_RETENTION
               value: {{ .Values.writes.auditRetention | quote }}
+            {{- if .Values.eventBus.enabled }}
+            {{- if .Values.eventBus.credentialsSecret.enabled }}
+            # ADR 0123: the credential booth-core minted for this module's declared `events`
+            # (ADR 0050). The file is re-read on every reconnect, so core's in-place renewal is
+            # picked up.
+            - name: BOOTH_NATS_CREDS_FILE
+              value: /etc/booth/event-bus/nats.creds
+            {{- if .Values.nats.url }}
+            - name: BOOTH_NATS_URL
+              value: {{ .Values.nats.url | quote }}
+            {{- else }}
+            - name: BOOTH_NATS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.eventBus.credentialsSecret.name }}
+                  key: url
+            {{- end }}
+            {{- else }}
+            - name: BOOTH_NATS_URL
+              value: {{ required "nats.url is required when eventBus.credentialsSecret.enabled is false: with no credentials Secret to take the address from, the event bus has nowhere to connect (set eventBus.enabled=false to leave the event bus out on purpose)" .Values.nats.url | quote }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.oidc.jwksUrl }}
             # ADR 0108 key-fetch override. Rendered even without issuerUrl, so that mistake fails
             # at startup instead of being silently ignored.
@@ -100,19 +122,41 @@ spec:
             httpGet:
               path: /healthz
               port: http
-          {{- if .Values.core.url }}
-          # Token files and Unix sockets for the per-workspace sidecars: in memory, private to
-          # this pod, gone when it stops (the root filesystem is read-only).
+          {{- $busCreds := and .Values.eventBus.enabled .Values.eventBus.credentialsSecret.enabled }}
+          {{- if or .Values.core.url $busCreds }}
           volumeMounts:
+            {{- if .Values.core.url }}
+            # Token files and Unix sockets for the per-workspace sidecars: in memory, private to
+            # this pod, gone when it stops (the root filesystem is read-only).
             - name: sidecars
               mountPath: /run/booth-api
+            {{- end }}
+            {{- if $busCreds }}
+            # A directory mount, deliberately not a single-file (sub-path) mount: the kubelet updates
+            # a mounted Secret in place when core renews the credential, but never a sub-path one.
+            - name: event-bus-credentials
+              mountPath: /etc/booth/event-bus
+              readOnly: true
+            {{- end }}
           {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-      {{- if .Values.core.url }}
+      {{- if or .Values.core.url $busCreds }}
       volumes:
+        {{- if .Values.core.url }}
         - name: sidecars
           emptyDir:
             medium: Memory
             sizeLimit: 16Mi
+        {{- end }}
+        {{- if $busCreds }}
+        - name: event-bus-credentials
+          secret:
+            secretName: {{ .Values.eventBus.credentialsSecret.name }}
+            # Not `optional`: if booth-core hasn't written the credential the pod waits, visibly,
+            # instead of starting without one and queueing events nobody publishes.
+            items:
+              - key: nats.creds
+                path: nats.creds
+        {{- end }}
       {{- end }}

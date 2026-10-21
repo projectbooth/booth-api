@@ -70,6 +70,13 @@ kubectl -n "$NS" create secret generic booth-database-credentials \
   --from-literal=database=booth_mod_api --from-literal=username=booth_mod_api --from-literal=password="$PGPASS" \
   --dry-run=client -o yaml | kubectl apply -f -
 
+# ADR 0123: the chart declares `events` and mounts core's booth-event-bus-credentials Secret, waiting
+# for it as it would for core. This stand-in's bus doesn't exist: the module must still become ready
+# (a bus outage never blocks it; events would wait in its outbox).
+kubectl -n "$NS" create secret generic booth-event-bus-credentials \
+  --from-literal=url=nats://no-bus.invalid:4222 --from-literal=nats.creds=stand-in \
+  --dry-run=client -o yaml | kubectl apply -f -
+
 helm upgrade --install a charts/booth-api -n "$NS" \
   --set image.repository=booth-api --set image.tag=it --set image.pullPolicy=Never --wait --timeout 5m
 
@@ -77,6 +84,8 @@ echo "--- BoothModule accepted by booth-core's real CRD schema:"
 kubectl -n "$NS" get boothmodule api -o jsonpath='{.spec.id} navPath={.spec.navPath} database={.spec.database.enabled} publicRoutes={.spec.publicRoutes.pathPrefixes}{"\n"}'
 # A CRD without the field would prune it silently, so check it survived.
 [ "$(kubectl -n "$NS" get boothmodule api -o jsonpath='{.spec.publicRoutes.pathPrefixes[0]}')" = /v1/ ] || { echo "publicRoutes pruned by the CRD"; exit 1; }
+[ "$(kubectl -n "$NS" get boothmodule api -o jsonpath='{.spec.events.publish}')" = '["api.write.committed"]' ] || { echo "events.publish missing or pruned by the CRD"; exit 1; }
+echo "events.publish=$(kubectl -n "$NS" get boothmodule api -o jsonpath='{.spec.events.publish}')"
 
 echo "--- readiness against the real database (helm --wait already required it):"
 kubectl -n "$NS" get deploy a-booth-api -o jsonpath='{.status.readyReplicas}/{.spec.replicas} ready{"\n"}'
@@ -85,7 +94,7 @@ echo "--- migrations applied in the module's own database (readiness waits for t
 tables=$(kubectl -n "$NS" exec pg -- psql -U booth_mod_api -d booth_mod_api -AtXc \
   "select string_agg(table_name, ',' order by table_name) from information_schema.tables where table_schema = 'public'")
 echo "$tables"
-[ "$tables" = "api_key_datasets,api_keys,api_schema_migrations,api_writes,apis,write_admin_log,write_grants,write_idempotency,write_log" ] || { echo "unexpected tables: $tables"; exit 1; }
+[ "$tables" = "api_key_datasets,api_keys,api_schema_migrations,api_writes,apis,event_outbox,write_admin_log,write_grants,write_idempotency,write_log" ] || { echo "unexpected tables: $tables"; exit 1; }
 
 echo "--- with no OIDC configured, the management API refuses (503) rather than letting anyone in:"
 kubectl -n "$NS" port-forward deploy/a-booth-api 18080:8080 >/dev/null 2>&1 &

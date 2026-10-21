@@ -51,6 +51,13 @@ type Config struct {
 	WriteRate         float64
 	WriteBurst        int
 	AuditRetention    time.Duration
+
+	// NATSURL is the event bus (ADR 0021) api.write.committed events go to (ADR 0123). Empty
+	// leaves events off: writes work, and no pipeline is triggered by them.
+	NATSURL string
+	// NATSCredsFile is booth-core's minted ".creds" file for this module's declared `events`
+	// (ADR 0050), mounted from the booth-event-bus-credentials Secret.
+	NATSCredsFile string
 }
 
 // DataAccess reports whether the workspace data path is configured.
@@ -97,6 +104,11 @@ func Load() (Config, error) {
 	}
 	if cfg.AuditRetention, err = time.ParseDuration(getEnv("BOOTH_WRITES_AUDIT_RETENTION", "2160h")); err != nil || cfg.AuditRetention <= 0 {
 		return Config{}, fmt.Errorf("BOOTH_WRITES_AUDIT_RETENTION must be a positive duration (default 2160h, 90 days)")
+	}
+	cfg.NATSURL = os.Getenv("BOOTH_NATS_URL")
+	cfg.NATSCredsFile = os.Getenv("BOOTH_NATS_CREDS_FILE")
+	if cfg.NATSCredsFile != "" && cfg.NATSURL == "" {
+		return Config{}, fmt.Errorf("BOOTH_NATS_CREDS_FILE is set but BOOTH_NATS_URL is not: the credentials have no bus to connect to")
 	}
 	if cfg.WorkloadIssuerURL != "" && cfg.OIDC.ClientID == "" {
 		return Config{}, fmt.Errorf("BOOTH_OIDC_WORKLOAD_ISSUER_URL needs BOOTH_OIDC_CLIENT_ID: core's workload tokens carry the same audience as a person's")

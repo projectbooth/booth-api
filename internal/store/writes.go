@@ -224,13 +224,6 @@ func (s *Store) ClaimIdempotencyKey(ctx context.Context, apiID, principal, key, 
 	return rec, claimed, err
 }
 
-// FinishIdempotencyKey stores a claimed key's result.
-func (s *Store) FinishIdempotencyKey(ctx context.Context, apiID, principal, key string, response json.RawMessage) error {
-	_, err := s.pool.Exec(ctx, `UPDATE write_idempotency SET state = 'done', response = $4
-		WHERE api_id = $1 AND principal = $2 AND key = $3`, apiID, principal, key, response)
-	return err
-}
-
 // ReleaseIdempotencyKey forgets a claimed key whose write certainly did not happen (refused
 // before or rolled back), so the client can retry with the same key.
 func (s *Store) ReleaseIdempotencyKey(ctx context.Context, apiID, principal, key string) error {
@@ -255,6 +248,37 @@ func (s *Store) LogWrite(ctx context.Context, e WriteLogEntry) error {
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
 		e.Workspace, e.APIID, e.Operation, e.Principal, e.GrantedBy, e.ReportedUser, e.RowKeyHash, e.IdempotencyKey, e.Status, e.Outcome, int(e.Duration.Milliseconds()))
 	return err
+}
+
+// IdempotencyResult is a claimed key's result, stored when its write commits.
+type IdempotencyResult struct {
+	APIID, Principal, Key string
+	Response              json.RawMessage
+}
+
+// RecordWrite records a committed write in one transaction: its audit entry, its idempotency key's
+// result (idem, if the write had a key) and its event for the outbox (ev, if events are on). So an
+// event is never queued for a write the audit log or the key doesn't show as done.
+func (s *Store) RecordWrite(ctx context.Context, e WriteLogEntry, idem *IdempotencyResult, ev *OutboxEvent) error {
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO write_log (workspace, api_id, operation, principal, granted_by, reported_user, row_key_hash, idempotency_key, status, outcome, duration_ms)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+			e.Workspace, e.APIID, e.Operation, e.Principal, e.GrantedBy, e.ReportedUser, e.RowKeyHash, e.IdempotencyKey, e.Status, e.Outcome, int(e.Duration.Milliseconds())); err != nil {
+			return err
+		}
+		if idem != nil {
+			if _, err := tx.Exec(ctx, `UPDATE write_idempotency SET state = 'done', response = $4
+				WHERE api_id = $1 AND principal = $2 AND key = $3`, idem.APIID, idem.Principal, idem.Key, idem.Response); err != nil {
+				return err
+			}
+		}
+		if ev != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO event_outbox (workspace, event_type, data) VALUES ($1, $2, $3)`, ev.Workspace, ev.EventType, ev.Data); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // LogAdmin records a change to write settings or grants.

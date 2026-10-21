@@ -224,6 +224,13 @@ Built (details and the choices made: `docs/decisions/0001-keys-and-api-definitio
   - **Audit:** a write audit log kept 90 days, with no row values.
   - **Not built yet:** write keys on the public route.
 
+- Write events (ADR 0123; `docs/decisions/0009`; contract `docs/contracts/events.md`): one
+  `api.write.committed` per committed app write on core's event bus, for booth-pipeline's event
+  triggers.
+  - **The event names** the API, its dataset and table, the operation and the app. Never row values.
+  - **Delivery:** sent from an outbox in booth-api's own database, so a bus outage delays events
+    rather than losing them (kept 24 hours).
+
 ## Judgment calls in the scaffold (see also `docs/decisions/`)
 
 - **`navPath: /apis`, not `/api`.** The shell's nginx proxies `/api/` and `/modules/` to booth-core

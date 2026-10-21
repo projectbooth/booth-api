@@ -14,6 +14,9 @@ Three surfaces:
 3. **The app write route**: what an app's Streamlit gate forwards an app's write to, with the
    app's own workload token.
 
+Each committed write also publishes `api.write.committed` on the event bus, for pipeline event
+triggers (ADR 0123; `docs/contracts/events.md`).
+
 booth-api holds the grants (ADR 0117 "Reconciled design" item 1). booth-streamlit never holds a
 person's token, so it doesn't make grants (item 1a):
 - The owner grants on booth-api's Writes panel. booth-streamlit's "Write targets" panel links there

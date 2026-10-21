@@ -144,15 +144,79 @@ func TestManifest_UI(t *testing.T) {
 }
 
 // The module stores API key hashes in its own database (ADR 0053, ADR 0100), so it must ask
-// core for one. It publishes no events, mints no workload tokens and provides no credentials.
+// core for one. It publishes exactly api.write.committed (ADR 0123) and subscribes to nothing; by
+// default (no core.url) it mints no workload tokens, and it never provides credentials.
 func TestManifest_Capabilities(t *testing.T) {
 	requireHelm(t)
 	m := renderBoothModule(t)
 	if m.Spec.Database["enabled"] != true {
 		t.Errorf("database = %v, want {enabled: true}", m.Spec.Database)
 	}
-	if m.Spec.Events != nil || m.Spec.WorkloadIdentity != nil || m.Spec.ProvidesCredentials != nil {
+	if m.Spec.WorkloadIdentity != nil || m.Spec.ProvidesCredentials != nil {
 		t.Error("manifest declares capabilities this module doesn't use")
+	}
+	if got := fmt.Sprint(m.Spec.Events); got != "map[publish:[api.write.committed]]" {
+		t.Errorf("events = %s, want exactly {publish: [api.write.committed]}", got)
+	}
+}
+
+// ADR 0123: the bus credential comes from core's Secret, mounted as a directory (so core's renewal
+// reaches the pod), and eventBus.enabled=false leaves the bus out entirely.
+func TestChart_EventBus(t *testing.T) {
+	requireHelm(t)
+	on := helmTemplate(t, "--set", "core.url=http://booth-core.booth-system.svc:8080")
+	var c, spec map[string]any
+	for _, d := range docs(t, on) {
+		if d["kind"] == "Deployment" {
+			spec = d["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+			c = spec["containers"].([]any)[0].(map[string]any)
+		}
+	}
+	env := map[string]string{}
+	for _, e := range c["env"].([]any) {
+		ev := e.(map[string]any)
+		if vf, ok := ev["valueFrom"].(map[string]any); ok {
+			ref := vf["secretKeyRef"].(map[string]any)
+			env[ev["name"].(string)] = ref["name"].(string) + "/" + ref["key"].(string)
+		} else {
+			env[ev["name"].(string)] = fmt.Sprint(ev["value"])
+		}
+	}
+	if env["BOOTH_NATS_URL"] != "booth-event-bus-credentials/url" || env["BOOTH_NATS_CREDS_FILE"] != "/etc/booth/event-bus/nats.creds" {
+		t.Errorf("bus env = url %q, creds %q", env["BOOTH_NATS_URL"], env["BOOTH_NATS_CREDS_FILE"])
+	}
+	var mounted, fromSecret bool
+	for _, m := range c["volumeMounts"].([]any) {
+		mm := m.(map[string]any)
+		if mm["name"] == "event-bus-credentials" {
+			_, sub := mm["subPath"]
+			mounted = mm["mountPath"] == "/etc/booth/event-bus" && mm["readOnly"] == true && !sub
+		}
+	}
+	for _, v := range spec["volumes"].([]any) {
+		vv := v.(map[string]any)
+		if vv["name"] == "event-bus-credentials" {
+			sec := vv["secret"].(map[string]any)
+			_, optional := sec["optional"]
+			fromSecret = sec["secretName"] == "booth-event-bus-credentials" && !optional
+		}
+	}
+	if !mounted || !fromSecret {
+		t.Errorf("credential mount = %v, volume from core's Secret (not optional) = %v", mounted, fromSecret)
+	}
+
+	off := string(helmTemplate(t, "--set", "eventBus.enabled=false"))
+	for _, s := range []string{"\n  events:", "BOOTH_NATS", "secretName: booth-event-bus-credentials"} {
+		if strings.Contains(off, s) {
+			t.Errorf("eventBus.enabled=false still renders %q", s)
+		}
+	}
+	if _, err := runHelm("--set", "eventBus.credentialsSecret.enabled=false"); err == nil {
+		t.Error("no credentials Secret and no nats.url rendered without an error")
+	}
+	stand := string(helmTemplate(t, "--set", "eventBus.credentialsSecret.enabled=false", "--set", "nats.url=nats://nats:4222"))
+	if !strings.Contains(stand, "- name: BOOTH_NATS_URL\n              value: \"nats://nats:4222\"") || strings.Contains(stand, "BOOTH_NATS_CREDS_FILE") {
+		t.Error("a stand-in bus without a credential doesn't render just its URL")
 	}
 }
 
@@ -279,7 +343,7 @@ func TestChart_DataAccess(t *testing.T) {
 	if ed, _ := vol["emptyDir"].(map[string]any); ed["medium"] != "Memory" {
 		t.Errorf("sidecar volume = %v, want an in-memory emptyDir", vol)
 	}
-	if fmt.Sprint(c["volumeMounts"]) != "[map[mountPath:/run/booth-api name:sidecars]]" {
+	if fmt.Sprint(c["volumeMounts"].([]any)[0]) != "map[mountPath:/run/booth-api name:sidecars]" {
 		t.Errorf("mounts = %v", c["volumeMounts"])
 	}
 }
