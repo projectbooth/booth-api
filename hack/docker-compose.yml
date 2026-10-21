@@ -2,6 +2,10 @@
 # introspection is tested on. Same image booth-core bundles. Usage:
 #   docker compose -f hack/docker-compose.yml up -d --wait
 #   eval "$(sh hack/test-env.sh)"
+# The project is named so that it doesn't default to the folder name, "hack": every sibling repo
+# keeps its compose file in hack/ too, and two projects of the same name replace each other's
+# containers.
+name: booth-api-test
 services:
   postgres:
     image: postgres:16-alpine
